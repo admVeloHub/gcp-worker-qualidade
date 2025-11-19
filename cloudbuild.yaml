@@ -1,4 +1,4 @@
-# VERSION: v1.0.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+# VERSION: v1.1.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
 # Cloud Build configuration para deploy do Worker no Cloud Run
 
 steps:
@@ -52,7 +52,7 @@ steps:
       - '--min-instances'
       - '0'
       - '--set-env-vars'
-      - 'PORT=8080'
+      - 'GCP_PROJECT_ID=velohub-471220,GCS_BUCKET_NAME=qualidade_audio_envio,PUBSUB_TOPIC_NAME=qualidade_audio_envio,PUBSUB_SUBSCRIPTION_NAME=upload_audio_qualidade,BACKEND_API_URL=https://backend-gcp-278491073220.us-east1.run.app,CONSOLE_ANALISES_DB=console_analises,GCP_LOCATION=us-central1,MAX_RETRIES=3,PORT=8080'
 
 # Imagens a serem armazenadas no Container Registry
 images:
