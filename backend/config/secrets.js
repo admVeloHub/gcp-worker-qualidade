@@ -1,4 +1,4 @@
-// VERSION: v1.0.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+// VERSION: v1.1.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
 // Módulo para integração com GCP Secret Manager
 
 const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
@@ -33,6 +33,17 @@ const initializeSecretClient = () => {
  */
 const getSecret = async (secretName, version = 'latest') => {
   try {
+    // PRIMEIRO: Verificar se já está disponível como variável de ambiente
+    // (útil quando secrets são expostos como env vars no Cloud Run)
+    if (process.env[secretName]) {
+      const envValue = process.env[secretName].trim();
+      console.log(`✅ Secret ${secretName} encontrado em variáveis de ambiente`);
+      // Armazenar no cache também
+      const cacheKey = `${secretName}:${version}`;
+      secretCache.set(cacheKey, envValue);
+      return envValue;
+    }
+
     // Verificar cache primeiro
     const cacheKey = `${secretName}:${version}`;
     if (secretCache.has(cacheKey)) {
