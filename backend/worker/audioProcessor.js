@@ -360,11 +360,18 @@ const startHttpServer = () => {
   app.use('/', healthCheckRouter);
   app.use('/', observatorioRouter);
   
+  // Detectar se está rodando no Cloud Run e construir URL base
+  const K_SERVICE = process.env.K_SERVICE;
+  const isCloudRun = !!K_SERVICE;
+  const baseUrl = isCloudRun 
+    ? 'https://worker-qualidade-278491073220.us-east1.run.app'
+    : `http://localhost:${PORT}`;
+  
   // Iniciar servidor
   const server = app.listen(PORT, () => {
     addLog('INFO', `🌐 Servidor HTTP iniciado na porta ${PORT}`);
-    addLog('INFO', `   - Health Check: http://localhost:${PORT}/health`);
-    addLog('INFO', `   - Observatório: http://localhost:${PORT}/observatorio`);
+    addLog('INFO', `   - Health Check: ${baseUrl}/health`);
+    addLog('INFO', `   - Observatório: ${baseUrl}/observatorio`);
   });
   
   return server;
