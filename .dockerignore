@@ -1,0 +1,22 @@
+# VERSION: v1.0.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+# Arquivos ignorados no build Docker
+
+node_modules/
+npm-debug.log
+.env
+.env.local
+.git/
+.gitignore
+README.md
+*.md
+.DS_Store
+.vscode/
+.idea/
+*.log
+coverage/
+.nyc_output/
+test/
+tests/
+*.test.js
+*.spec.js
+

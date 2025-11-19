@@ -1,0 +1,69 @@
+# VERSION: v1.0.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+# Cloud Build configuration para deploy do Worker no Cloud Run
+
+steps:
+  # Build da imagem Docker para Worker
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/audio-worker:$SHORT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/audio-worker:latest'
+      - '-f'
+      - 'Dockerfile'
+      - '.'
+
+  # Push da imagem para Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'gcr.io/$PROJECT_ID/audio-worker:$SHORT_SHA'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'gcr.io/$PROJECT_ID/audio-worker:latest'
+
+  # Deploy no Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'audio-worker'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/audio-worker:$SHORT_SHA'
+      - '--region'
+      - 'us-central1'
+      - '--platform'
+      - 'managed'
+      - '--no-allow-unauthenticated'
+      - '--port'
+      - '8080'
+      - '--memory'
+      - '2Gi'
+      - '--cpu'
+      - '2'
+      - '--timeout'
+      - '3600'
+      - '--max-instances'
+      - '5'
+      - '--min-instances'
+      - '0'
+      - '--set-env-vars'
+      - 'PORT=8080'
+
+# Imagens a serem armazenadas no Container Registry
+images:
+  - 'gcr.io/$PROJECT_ID/audio-worker:$SHORT_SHA'
+  - 'gcr.io/$PROJECT_ID/audio-worker:latest'
+
+# Timeout do build (10 minutos)
+timeout: '600s'
+
+# Opções do build
+options:
+  machineType: 'E2_HIGHCPU_8'
+  logging: CLOUD_LOGGING_ONLY
+
