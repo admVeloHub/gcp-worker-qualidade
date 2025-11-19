@@ -1,14 +1,67 @@
-// VERSION: v1.0.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+// VERSION: v1.1.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
 const mongoose = require('mongoose');
+const { getSecret } = require('../config/secrets');
 
 // Configurar conexão específica para console_analises
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://lucasgravina:nKQu8bSN6iZl8FPo@velohubcentral.od7vwts.mongodb.net/?retryWrites=true&w=majority&appName=VelohubCentral';
+let MONGODB_URI;
 const ANALISES_DB_NAME = process.env.CONSOLE_ANALISES_DB || 'console_analises';
 
-// Criar conexão específica para análises
-const analisesConnection = mongoose.createConnection(MONGODB_URI, {
-  dbName: ANALISES_DB_NAME
-});
+// Variável para armazenar a conexão
+let analisesConnection;
+let connectionPromise;
+
+/**
+ * Inicializar conexão MongoDB usando Secret Manager
+ * @returns {Promise<mongoose.Connection>}
+ */
+const initializeConnection = async () => {
+  if (analisesConnection && analisesConnection.readyState === 1) {
+    return analisesConnection;
+  }
+
+  if (connectionPromise) {
+    return connectionPromise;
+  }
+
+  connectionPromise = (async () => {
+    try {
+      // Buscar URI do MongoDB do Secret Manager
+      if (!MONGODB_URI) {
+        MONGODB_URI = await getSecret('MONGO_ENV');
+      }
+
+      // Criar conexão específica para análises
+      analisesConnection = mongoose.createConnection(MONGODB_URI, {
+        dbName: ANALISES_DB_NAME
+      });
+
+      // Aguardar conexão estar pronta
+      await new Promise((resolve, reject) => {
+        analisesConnection.on('connected', () => {
+          console.log('✅ Conexão MongoDB (AudioAnaliseResult) estabelecida');
+          resolve();
+        });
+
+        analisesConnection.on('error', (error) => {
+          console.error('❌ Erro na conexão MongoDB (AudioAnaliseResult):', error);
+          reject(error);
+        });
+
+        // Se já estiver conectado, resolver imediatamente
+        if (analisesConnection.readyState === 1) {
+          resolve();
+        }
+      });
+
+      return analisesConnection;
+    } catch (error) {
+      connectionPromise = null;
+      throw error;
+    }
+  })();
+
+  return connectionPromise;
+};
 
 // Schema para critérios de qualidade
 const criteriosQualidadeSchema = new mongoose.Schema({
@@ -103,7 +156,29 @@ audioAnaliseResultSchema.index({ audioStatusId: 1 });
 audioAnaliseResultSchema.index({ nomeArquivo: 1 });
 audioAnaliseResultSchema.index({ createdAt: -1 });
 
-const AudioAnaliseResult = analisesConnection.model('AudioAnaliseResult', audioAnaliseResultSchema);
+// Função para obter o modelo (garante que a conexão está inicializada)
+const getModel = async () => {
+  const connection = await initializeConnection();
+  return connection.model('AudioAnaliseResult', audioAnaliseResultSchema);
+};
+
+// Modelo (será inicializado quando necessário)
+let AudioAnaliseResultModel;
+
+/**
+ * Obter modelo AudioAnaliseResult
+ * @returns {Promise<mongoose.Model>}
+ */
+const AudioAnaliseResult = {
+  async model() {
+    if (!AudioAnaliseResultModel) {
+      const connection = await initializeConnection();
+      AudioAnaliseResultModel = connection.model('AudioAnaliseResult', audioAnaliseResultSchema);
+    }
+    return AudioAnaliseResultModel;
+  }
+};
 
 module.exports = AudioAnaliseResult;
+module.exports.initializeConnection = initializeConnection;
 

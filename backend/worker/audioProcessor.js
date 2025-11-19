@@ -1,8 +1,9 @@
-// VERSION: v2.0.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+// VERSION: v2.1.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
 // Worker assíncrono para processamento de áudio via Pub/Sub
 
 const { PubSub } = require('@google-cloud/pubsub');
 const axios = require('axios');
+const express = require('express');
 const AudioAnaliseStatus = require('../models/AudioAnaliseStatus');
 const AudioAnaliseResult = require('../models/AudioAnaliseResult');
 const {
@@ -12,22 +13,62 @@ const {
   crossReferenceOutputs,
   retryWithExponentialBackoff
 } = require('../config/vertexAI');
+const healthCheckRouter = require('./healthCheck');
+const observatorioRouter = require('./observatorio');
+const { registerWorkerInstances } = healthCheckRouter;
 require('dotenv').config();
 
 // Configuração
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID;
 const GCS_BUCKET_NAME = process.env.GCS_BUCKET_NAME || 'qualidade_audio_envio';
-const PUBSUB_SUBSCRIPTION_NAME = process.env.PUBSUB_SUBSCRIPTION_NAME || 'upoad_audio_qualidade';
+const PUBSUB_SUBSCRIPTION_NAME = process.env.PUBSUB_SUBSCRIPTION_NAME || 'upload_audio_qualidade';
 const PUBSUB_TOPIC_NAME = process.env.PUBSUB_TOPIC_NAME || 'qualidade_audio_envio';
 const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3', 10);
 const BACKEND_API_URL = process.env.BACKEND_API_URL || 'http://localhost:3001';
+const PORT = process.env.PORT || 8080;
 
 // Inicializar Pub/Sub
 let pubsub;
 let subscription;
 
+// Instâncias para health check
+let speechClientInstance = null;
+let genAIInstance = null;
+
 // Contador de tentativas por mensagem
 const messageRetries = new Map();
+
+// Estatísticas de processamento
+const stats = {
+  startTime: Date.now(),
+  totalProcessed: 0,
+  totalSuccess: 0,
+  totalFailed: 0,
+  lastMessageTime: null,
+  processingMessages: new Map(), // messageId -> { fileName, startTime }
+  messageHistory: [] // Últimas 50 mensagens processadas
+};
+
+// Logs recentes (últimas 100 linhas)
+const recentLogs = [];
+const MAX_LOGS = 100;
+
+/**
+ * Adicionar log ao histórico
+ */
+const addLog = (level, message) => {
+  const logEntry = {
+    timestamp: new Date().toISOString(),
+    level,
+    message
+  };
+  recentLogs.push(logEntry);
+  if (recentLogs.length > MAX_LOGS) {
+    recentLogs.shift();
+  }
+  // Também logar no console
+  console.log(`[${logEntry.timestamp}] [${level}] ${message}`);
+};
 
 /**
  * Inicializar cliente Pub/Sub
@@ -82,12 +123,12 @@ const processAudio = async (gcsUri, fileName) => {
   const startTime = Date.now();
   
   try {
-    console.log(`🎵 Iniciando processamento de áudio: ${fileName}`);
+    addLog('INFO', `🎵 Iniciando processamento de áudio: ${fileName}`);
     
     // 1. Transcrever áudio com retry
-    console.log('📝 Passo 1: Transcrevendo áudio...');
+    addLog('INFO', '📝 Passo 1: Transcrevendo áudio...');
     const transcriptionResult = await retryWithExponentialBackoff(
-      () => transcribeAudio(gcsUri, 'pt-BR'),
+      () => transcribeAudio(gcsUri, fileName, 'pt-BR'),
       MAX_RETRIES
     );
     
@@ -95,29 +136,29 @@ const processAudio = async (gcsUri, fileName) => {
       throw new Error('Transcrição vazia ou inválida');
     }
     
-    console.log(`✅ Transcrição concluída: ${transcriptionResult.transcription.length} caracteres`);
+    addLog('INFO', `✅ Transcrição concluída: ${transcriptionResult.transcription.length} caracteres`);
     
     // 2. Analisar emoção e nuance com retry
-    console.log('🧠 Passo 2: Analisando emoção e nuance...');
+    addLog('INFO', '🧠 Passo 2: Analisando emoção e nuance...');
     const emotionResult = await retryWithExponentialBackoff(
       () => analyzeEmotionAndNuance(transcriptionResult.transcription, transcriptionResult.timestamps),
       MAX_RETRIES
     );
     
-    console.log(`✅ Análise de emoção concluída. Pontuação: ${emotionResult.pontuacaoGPT}`);
+    addLog('INFO', `✅ Análise de emoção concluída. Pontuação: ${emotionResult.pontuacaoGPT}`);
     
     // 3. Cruzar outputs
-    console.log('🔗 Passo 3: Cruzando outputs...');
+    addLog('INFO', '🔗 Passo 3: Cruzando outputs...');
     const crossReferenced = crossReferenceOutputs(transcriptionResult, emotionResult);
     
     const processingTime = (Date.now() - startTime) / 1000;
     crossReferenced.processingTime = processingTime;
     
-    console.log(`✅ Processamento completo em ${processingTime.toFixed(2)}s`);
+    addLog('INFO', `✅ Processamento completo em ${processingTime.toFixed(2)}s`);
     
     return crossReferenced;
   } catch (error) {
-    console.error('❌ Erro ao processar áudio:', error);
+    addLog('ERROR', `❌ Erro ao processar áudio: ${error.message}`);
     throw error;
   }
 };
@@ -132,11 +173,11 @@ const processMessage = async (message) => {
   let retryCount = messageRetries.get(messageId) || 0;
   
   try {
-    console.log(`📨 Mensagem recebida do Pub/Sub [ID: ${messageId}]`);
+    addLog('INFO', `📨 Mensagem recebida do Pub/Sub [ID: ${messageId}]`);
     
     // Parse da mensagem do GCS
     const data = JSON.parse(message.data.toString());
-    console.log('📋 Dados da mensagem:', JSON.stringify(data, null, 2));
+    addLog('DEBUG', `📋 Dados da mensagem: ${JSON.stringify(data, null, 2)}`);
 
     // Extrair informações do evento GCS
     const fileName = data.name || data.object || data.fileName;
@@ -148,29 +189,37 @@ const processMessage = async (message) => {
 
     // Construir URI do GCS
     const gcsUri = `gs://${bucketName}/${fileName}`;
-    console.log(`🔄 Processando arquivo: ${fileName}`);
-    console.log(`📍 GCS URI: ${gcsUri}`);
+    addLog('INFO', `🔄 Processando arquivo: ${fileName}`);
+    addLog('DEBUG', `📍 GCS URI: ${gcsUri}`);
+
+    // Registrar início do processamento
+    stats.processingMessages.set(messageId, {
+      fileName,
+      startTime: Date.now()
+    });
 
     // Buscar registro de status no MongoDB
     audioStatus = await AudioAnaliseStatus.findByNomeArquivo(fileName);
     
     if (!audioStatus) {
-      console.warn(`⚠️  Registro de status não encontrado para: ${fileName}`);
+      addLog('WARN', `⚠️  Registro de status não encontrado para: ${fileName}`);
       // Criar registro se não existir
-      audioStatus = new AudioAnaliseStatus({
+      const StatusModel = await AudioAnaliseStatus.model();
+      audioStatus = new StatusModel({
         nomeArquivo: fileName,
         sent: true,
         treated: false
       });
       await audioStatus.save();
-      console.log(`✅ Registro de status criado: ${audioStatus._id}`);
+      addLog('INFO', `✅ Registro de status criado: ${audioStatus._id}`);
     }
 
     // Processar áudio
     const analysisResult = await processAudio(gcsUri, fileName);
 
     // Salvar resultado no MongoDB
-    const audioResult = new AudioAnaliseResult({
+    const ResultModel = await AudioAnaliseResult.model();
+    const audioResult = new ResultModel({
       audioStatusId: audioStatus._id,
       nomeArquivo: fileName,
       gcsUri: gcsUri,
@@ -190,45 +239,90 @@ const processMessage = async (message) => {
     });
 
     await audioResult.save();
-    console.log(`✅ Resultado salvo no MongoDB: ${audioResult._id}`);
+    addLog('INFO', `✅ Resultado salvo no MongoDB: ${audioResult._id}`);
 
     // Atualizar status para treated=true
     await audioStatus.marcarComoTratado();
-    console.log(`✅ Status atualizado: treated=true para audioId: ${audioStatus._id}`);
+    addLog('INFO', `✅ Status atualizado: treated=true para audioId: ${audioStatus._id}`);
 
     // Notificar backend API sobre conclusão (dispara evento SSE)
     await notifyBackendCompletion(audioStatus._id.toString());
 
-    // Limpar contador de retries
+    // Atualizar estatísticas
+    stats.totalProcessed++;
+    stats.totalSuccess++;
+    stats.lastMessageTime = Date.now();
+    
+    // Adicionar ao histórico
+    const processingInfo = stats.processingMessages.get(messageId);
+    const processingTime = processingInfo ? (Date.now() - processingInfo.startTime) / 1000 : 0;
+    
+    stats.messageHistory.push({
+      messageId,
+      fileName,
+      status: 'success',
+      processingTime,
+      timestamp: new Date().toISOString()
+    });
+    
+    // Manter apenas últimas 50 mensagens
+    if (stats.messageHistory.length > 50) {
+      stats.messageHistory.shift();
+    }
+
+    // Limpar contador de retries e mensagem em processamento
     messageRetries.delete(messageId);
+    stats.processingMessages.delete(messageId);
 
     // Confirmar mensagem processada
     message.ack();
-    console.log(`✅ Mensagem processada e confirmada [ID: ${messageId}]`);
+    addLog('INFO', `✅ Mensagem processada e confirmada [ID: ${messageId}]`);
     
   } catch (error) {
-    console.error(`❌ Erro ao processar mensagem [ID: ${messageId}]:`, error);
+    addLog('ERROR', `❌ Erro ao processar mensagem [ID: ${messageId}]: ${error.message}`);
     
     retryCount++;
     messageRetries.set(messageId, retryCount);
     
     // Se excedeu máximo de retries, enviar para Dead Letter Queue ou marcar como erro
     if (retryCount >= MAX_RETRIES) {
-      console.error(`❌ Máximo de tentativas excedido para mensagem [ID: ${messageId}]. Enviando para DLQ.`);
+      addLog('ERROR', `❌ Máximo de tentativas excedido para mensagem [ID: ${messageId}]. Enviando para DLQ.`);
+      
+      // Atualizar estatísticas
+      stats.totalProcessed++;
+      stats.totalFailed++;
+      
+      // Adicionar ao histórico
+      const processingInfo = stats.processingMessages.get(messageId);
+      const processingTime = processingInfo ? (Date.now() - processingInfo.startTime) / 1000 : 0;
+      
+      stats.messageHistory.push({
+        messageId,
+        fileName: processingInfo?.fileName || 'unknown',
+        status: 'failed',
+        error: error.message,
+        processingTime,
+        timestamp: new Date().toISOString()
+      });
+      
+      // Manter apenas últimas 50 mensagens
+      if (stats.messageHistory.length > 50) {
+        stats.messageHistory.shift();
+      }
       
       // Marcar como erro no status se existir
       if (audioStatus) {
-        // Poderia adicionar campo de erro no schema se necessário
-        console.error(`⚠️  Status não atualizado para audioId: ${audioStatus._id}`);
+        addLog('ERROR', `⚠️  Status não atualizado para audioId: ${audioStatus._id}`);
       }
       
       // Nack sem modificar deadline para enviar para DLQ
       message.nack();
       messageRetries.delete(messageId);
+      stats.processingMessages.delete(messageId);
     } else {
       // Retry com exponential backoff
       const delay = 1000 * Math.pow(2, retryCount - 1);
-      console.log(`⏳ Retry ${retryCount}/${MAX_RETRIES} em ${delay}ms...`);
+      addLog('WARN', `⏳ Retry ${retryCount}/${MAX_RETRIES} em ${delay}ms...`);
       
       setTimeout(() => {
         message.nack();
@@ -238,42 +332,94 @@ const processMessage = async (message) => {
 };
 
 /**
+ * Inicializar MongoDB
+ */
+const initializeMongoDB = async () => {
+  try {
+    addLog('INFO', '🔄 Inicializando conexão MongoDB...');
+    await AudioAnaliseStatus.initializeConnection();
+    await AudioAnaliseResult.initializeConnection();
+    addLog('INFO', '✅ MongoDB inicializado com sucesso');
+    return true;
+  } catch (error) {
+    addLog('ERROR', `❌ Erro ao inicializar MongoDB: ${error.message}`);
+    throw error;
+  }
+};
+
+/**
+ * Iniciar servidor HTTP para health check e observatório
+ */
+const startHttpServer = () => {
+  const app = express();
+  
+  // Middleware
+  app.use(express.json());
+  
+  // Rotas
+  app.use('/', healthCheckRouter);
+  app.use('/', observatorioRouter);
+  
+  // Iniciar servidor
+  const server = app.listen(PORT, () => {
+    addLog('INFO', `🌐 Servidor HTTP iniciado na porta ${PORT}`);
+    addLog('INFO', `   - Health Check: http://localhost:${PORT}/health`);
+    addLog('INFO', `   - Observatório: http://localhost:${PORT}/observatorio`);
+  });
+  
+  return server;
+};
+
+/**
  * Iniciar worker
  */
-const startWorker = () => {
+const startWorker = async () => {
   try {
-    // Inicializar Vertex AI
-    initializeVertexAI();
+    addLog('INFO', '🚀 Iniciando worker...');
     
-    // Inicializar Pub/Sub
+    // 1. Inicializar MongoDB primeiro
+    await initializeMongoDB();
+    
+    // 2. Inicializar Vertex AI
+    const { speechClient, genAI } = await initializeVertexAI();
+    speechClientInstance = speechClient;
+    genAIInstance = genAI;
+    
+    // 3. Inicializar Pub/Sub
     initializePubSub();
     
-    // Escutar mensagens
+    // Registrar instâncias para health check
+    registerWorkerInstances(subscription, speechClientInstance, genAIInstance);
+    
+    // 4. Iniciar servidor HTTP
+    startHttpServer();
+    
+    // 5. Escutar mensagens
     subscription.on('message', processMessage);
     
-    // Tratar erros
+    // 6. Tratar erros
     subscription.on('error', (error) => {
-      console.error('❌ Erro no subscription:', error);
+      addLog('ERROR', `❌ Erro no subscription: ${error.message}`);
     });
     
-    // Tratar desconexões
+    // 7. Tratar desconexões
     process.on('SIGINT', () => {
-      console.log('\n⚠️  Recebido SIGINT. Encerrando worker...');
+      addLog('WARN', '\n⚠️  Recebido SIGINT. Encerrando worker...');
       subscription.close(() => {
-        console.log('✅ Subscription fechada');
+        addLog('INFO', '✅ Subscription fechada');
         process.exit(0);
       });
     });
     
-    console.log('🚀 Worker iniciado e aguardando mensagens...');
-    console.log(`📊 Configuração:`);
-    console.log(`   - Projeto: ${GCP_PROJECT_ID}`);
-    console.log(`   - Bucket: ${GCS_BUCKET_NAME}`);
-    console.log(`   - Subscription: ${PUBSUB_SUBSCRIPTION_NAME}`);
-    console.log(`   - Max Retries: ${MAX_RETRIES}`);
+    addLog('INFO', '🚀 Worker iniciado e aguardando mensagens...');
+    addLog('INFO', `📊 Configuração:`);
+    addLog('INFO', `   - Projeto: ${GCP_PROJECT_ID}`);
+    addLog('INFO', `   - Bucket: ${GCS_BUCKET_NAME}`);
+    addLog('INFO', `   - Subscription: ${PUBSUB_SUBSCRIPTION_NAME}`);
+    addLog('INFO', `   - Max Retries: ${MAX_RETRIES}`);
     
   } catch (error) {
-    console.error('❌ Erro ao iniciar worker:', error);
+    addLog('ERROR', `❌ Erro ao iniciar worker: ${error.message}`);
     process.exit(1);
   }
 };
@@ -287,6 +433,9 @@ module.exports = {
   startWorker,
   processMessage,
   processAudio,
-  initializePubSub
+  initializePubSub,
+  initializeMongoDB,
+  getStats: () => ({ ...stats, processingMessages: Array.from(stats.processingMessages.entries()) }),
+  getLogs: () => recentLogs
 };
 
