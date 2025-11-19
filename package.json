@@ -1,0 +1,38 @@
+{
+  "name": "gcp-worker-qualidade",
+  "version": "1.0.0",
+  "description": "Worker assíncrono para processamento de análise de qualidade de áudio - VeloHub",
+  "main": "backend/worker/audioProcessor.js",
+  "scripts": {
+    "start": "node backend/worker/audioProcessor.js",
+    "dev": "nodemon backend/worker/audioProcessor.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "velohub",
+    "worker",
+    "audio",
+    "quality",
+    "gcp",
+    "pubsub",
+    "vertex-ai"
+  ],
+  "author": "VeloHub Development Team",
+  "license": "MIT",
+  "dependencies": {
+    "@google-cloud/pubsub": "^3.4.0",
+    "@google-cloud/speech": "^6.0.0",
+    "@google/generative-ai": "^0.2.0",
+    "axios": "^1.12.2",
+    "dotenv": "^16.0.3",
+    "mongoose": "^7.5.0"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.20"
+  },
+  "engines": {
+    "node": ">=16.0.0",
+    "npm": ">=8.0.0"
+  }
+}
+
