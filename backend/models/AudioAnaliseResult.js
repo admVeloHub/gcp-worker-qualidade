@@ -1,4 +1,4 @@
-// VERSION: v1.1.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+// VERSION: v1.2.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
 const mongoose = require('mongoose');
 const { getSecret } = require('../config/secrets');
 
@@ -25,9 +25,14 @@ const initializeConnection = async () => {
 
   connectionPromise = (async () => {
     try {
-      // Buscar URI do MongoDB do Secret Manager
+      // Buscar URI do MongoDB - verificar env var primeiro, depois Secret Manager
       if (!MONGODB_URI) {
-        MONGODB_URI = await getSecret('MONGO_ENV');
+        if (process.env.MONGO_ENV) {
+          MONGODB_URI = process.env.MONGO_ENV;
+          console.log('✅ MongoDB URI encontrada em variáveis de ambiente');
+        } else {
+          MONGODB_URI = await getSecret('MONGO_ENV');
+        }
       }
 
       // Criar conexão específica para análises

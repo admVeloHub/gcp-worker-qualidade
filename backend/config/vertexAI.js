@@ -1,4 +1,4 @@
-// VERSION: v1.2.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+// VERSION: v1.3.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
 const speech = require('@google-cloud/speech');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { getSecret } = require('./secrets');
@@ -58,12 +58,17 @@ const initializeVertexAI = async () => {
       });
     }
 
-    // Buscar GEMINI_API_KEY do Secret Manager se ainda não foi carregada
+    // Buscar GEMINI_API_KEY - verificar env var primeiro, depois Secret Manager
     if (!geminiApiKey) {
-      try {
-        geminiApiKey = await getSecret('GEMINI_API_KEY');
-      } catch (error) {
-        throw new Error(`Falha ao buscar GEMINI_API_KEY do Secret Manager: ${error.message}`);
+      if (process.env.GEMINI_API_KEY) {
+        geminiApiKey = process.env.GEMINI_API_KEY;
+        console.log('✅ GEMINI_API_KEY encontrada em variáveis de ambiente');
+      } else {
+        try {
+          geminiApiKey = await getSecret('GEMINI_API_KEY');
+        } catch (error) {
+          throw new Error(`Falha ao buscar GEMINI_API_KEY do Secret Manager: ${error.message}`);
+        }
       }
     }
 
