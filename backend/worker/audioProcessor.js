@@ -1,4 +1,4 @@
-// VERSION: v2.1.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+// VERSION: v2.2.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
 // Worker assíncrono para processamento de áudio via Pub/Sub
 
 const { PubSub } = require('@google-cloud/pubsub');
@@ -377,38 +377,59 @@ const startWorker = async () => {
   try {
     addLog('INFO', '🚀 Iniciando worker...');
     
-    // 1. Inicializar MongoDB primeiro
-    await initializeMongoDB();
-    
-    // 2. Inicializar Vertex AI
-    const { speechClient, genAI } = await initializeVertexAI();
-    speechClientInstance = speechClient;
-    genAIInstance = genAI;
-    
-    // 3. Inicializar Pub/Sub
-    initializePubSub();
-    
-    // Registrar instâncias para health check
-    registerWorkerInstances(subscription, speechClientInstance, genAIInstance);
-    
-    // 4. Iniciar servidor HTTP
+    // 1. INICIAR SERVIDOR HTTP PRIMEIRO (crítico para Cloud Run health check)
     startHttpServer();
+    addLog('INFO', '✅ Servidor HTTP iniciado - Cloud Run pode verificar saúde');
     
-    // 5. Escutar mensagens
-    subscription.on('message', processMessage);
-    
-    // 6. Tratar erros
-    subscription.on('error', (error) => {
-      addLog('ERROR', `❌ Erro no subscription: ${error.message}`);
+    // 2. Inicializar componentes em background (não bloqueia servidor)
+    // MongoDB
+    initializeMongoDB().then(() => {
+      addLog('INFO', '✅ MongoDB inicializado com sucesso');
+    }).catch(error => {
+      addLog('ERROR', `❌ Erro ao inicializar MongoDB: ${error.message}`);
+      // Não travar o servidor se MongoDB falhar
     });
     
-    // 7. Tratar desconexões
+    // Pub/Sub (inicializar primeiro para ter subscription disponível)
+    try {
+      initializePubSub();
+      addLog('INFO', '✅ Pub/Sub inicializado');
+      
+      subscription.on('message', processMessage);
+      subscription.on('error', (error) => {
+        addLog('ERROR', `❌ Erro no subscription: ${error.message}`);
+      });
+    } catch (error) {
+      addLog('ERROR', `❌ Erro ao inicializar Pub/Sub: ${error.message}`);
+      // Não travar o servidor se Pub/Sub falhar
+    }
+    
+    // Vertex AI
+    initializeVertexAI().then(({ speechClient, genAI }) => {
+      speechClientInstance = speechClient;
+      genAIInstance = genAI;
+      addLog('INFO', '✅ Vertex AI inicializado com sucesso');
+      
+      // Registrar instâncias para health check quando tudo estiver pronto
+      if (subscription && speechClientInstance && genAIInstance) {
+        registerWorkerInstances(subscription, speechClientInstance, genAIInstance);
+      }
+    }).catch(error => {
+      addLog('ERROR', `❌ Erro ao inicializar Vertex AI: ${error.message}`);
+      // Não travar o servidor se Vertex AI falhar
+    });
+    
+    // Tratar desconexões
     process.on('SIGINT', () => {
       addLog('WARN', '\n⚠️  Recebido SIGINT. Encerrando worker...');
-      subscription.close(() => {
-        addLog('INFO', '✅ Subscription fechada');
+      if (subscription) {
+        subscription.close(() => {
+          addLog('INFO', '✅ Subscription fechada');
+          process.exit(0);
+        });
+      } else {
         process.exit(0);
-      });
+      }
     });
     
     addLog('INFO', '🚀 Worker iniciado e aguardando mensagens...');
@@ -420,7 +441,8 @@ const startWorker = async () => {
     
   } catch (error) {
     addLog('ERROR', `❌ Erro ao iniciar worker: ${error.message}`);
-    process.exit(1);
+    // NÃO fazer exit(1) aqui - deixar servidor HTTP rodar para Cloud Run
+    // O servidor já foi iniciado, então Cloud Run pode fazer health check
   }
 };
 
