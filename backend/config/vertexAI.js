@@ -1,4 +1,4 @@
-// VERSION: v1.3.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+// VERSION: v1.4.0 | DATE: 2025-11-24 | AUTHOR: VeloHub Development Team
 const speech = require('@google-cloud/speech');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { getSecret } = require('./secrets');
@@ -200,12 +200,42 @@ Analise a seguinte transcrição de uma ligação de atendimento e forneça:
    - encerramentoBrusco: Encerrou o contato de forma brusca? (true = negativo)
 
 3. PONTUAÇÃO:
-   Calcule pontuação de 0-100 baseado nos critérios:
-   - Critérios positivos: +10 a +25 pontos cada
-   - Critérios negativos: -60 a -100 pontos cada
+   Calcule a pontuação baseado nos critérios abaixo. A pontuação pode variar de -160 a 100 pontos:
+   
+   CRITÉRIOS POSITIVOS (somam pontos):
+   - saudacaoAdequada: +10 pontos
+   - escutaAtiva: +15 pontos
+   - clarezaObjetividade: +10 pontos
+   - resolucaoQuestao: +25 pontos
+   - dominioAssunto: +15 pontos
+   - empatiaCordialidade: +15 pontos
+   - direcionouPesquisa: +10 pontos
+   
+   CRITÉRIOS NEGATIVOS (subtraem pontos):
+   - encerramentoBrusco: -100 pontos (se o colaborador encerrou o contato de forma brusca ou derrubou a ligação)
+   - procedimentoIncorreto: -60 pontos (se o colaborador repassou um procedimento incorreto)
+   
+   IMPORTANTE: Some todos os critérios positivos que forem true e subtraia os critérios negativos que forem true.
+   A pontuação final pode ser negativa se houver critérios negativos.
 
 4. PALAVRAS-CHAVE CRÍTICAS:
-   Liste palavras ou frases que indicam problemas ou pontos de atenção.
+   Você DEVE buscar especificamente pelas seguintes palavras ou frases na transcrição:
+   - "procon" (ou "PROCON")
+   - "bacen" (ou "BACEN" ou "Banco Central")
+   - "processo" (quando relacionado a processo judicial ou administrativo)
+   - "acionar na justiça" (ou variações como "processar", "entrar na justiça", "acionar judicialmente")
+   - "denuncia" (ou "denúncia", "denunciar")
+   
+   Sinônimos e variações também devem ser considerados:
+   - "reclamação formal", "reclamação no PROCON", "reclamação no BACEN"
+   - "processar", "processo judicial", "ação judicial"
+   - "advogado", "entrar com ação", "ir para a justiça"
+   - "denunciar", "fazer denúncia", "registrar denúncia"
+   
+   IMPORTANTE: 
+   - Se NENHUMA dessas palavras ou sinônimos for encontrada na transcrição, retorne um array vazio: []
+   - Se encontrar alguma dessas palavras ou sinônimos, liste-as no array palavrasCriticas
+   - Não invente palavras críticas que não estejam relacionadas a reclamações formais ou processos legais
 
 TRANSCRIÇÃO:
 ${transcription}
@@ -226,7 +256,7 @@ Retorne um JSON com a seguinte estrutura:
   },
   "pontuacaoGPT": number,
   "confianca": number,
-  "palavrasCriticas": ["palavra1", "palavra2"],
+  "palavrasCriticas": ["procon", "bacen"] ou [] (array vazio se nenhuma palavra crítica for encontrada),
   "calculoDetalhado": ["explicação1", "explicação2"],
   "emotion": {
     "tom": "positivo|neutro|negativo",
