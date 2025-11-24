@@ -1,4 +1,4 @@
-// VERSION: v1.2.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+// VERSION: v1.3.0 | DATE: 2025-11-24 | AUTHOR: VeloHub Development Team
 const mongoose = require('mongoose');
 const { getSecret } = require('../config/secrets');
 
@@ -128,7 +128,7 @@ const audioAnaliseResultSchema = new mongoose.Schema({
     criterios: criteriosQualidadeSchema,
     pontuacao: {
       type: Number,
-      min: 0,
+      min: -160,
       max: 100
     },
     confianca: {
@@ -139,6 +139,31 @@ const audioAnaliseResultSchema = new mongoose.Schema({
     palavrasCriticas: [String],
     calculoDetalhado: [String],
     analysis: String
+  },
+  gptAnalysis: {
+    criterios: criteriosQualidadeSchema,
+    pontuacao: {
+      type: Number,
+      min: -160,
+      max: 100
+    },
+    palavrasCriticas: [String],
+    recomendacoes: [String],
+    confianca: {
+      type: Number,
+      min: 0,
+      max: 100
+    },
+    validacaoGemini: {
+      concorda: Boolean,
+      diferencas: [String]
+    },
+    analysis: String
+  },
+  pontuacaoConsensual: {
+    type: Number,
+    min: -160,
+    max: 100
   },
   processingTime: {
     type: Number // em segundos

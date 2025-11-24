@@ -1,4 +1,4 @@
-// VERSION: v1.4.0 | DATE: 2025-11-24 | AUTHOR: VeloHub Development Team
+// VERSION: v1.5.0 | DATE: 2025-11-24 | AUTHOR: VeloHub Development Team
 const speech = require('@google-cloud/speech');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { getSecret } = require('./secrets');
@@ -306,11 +306,18 @@ Retorne um JSON com a seguinte estrutura:
 /**
  * Cruzar outputs de transcrição e análise de emoção
  * @param {object} transcriptionResult - Resultado da transcrição
- * @param {object} emotionResult - Resultado da análise de emoção
+ * @param {object} emotionResult - Resultado da análise de emoção (Gemini)
+ * @param {object} gptResult - Resultado da análise GPT (opcional)
  * @returns {object} Resultado cruzado
  */
-const crossReferenceOutputs = (transcriptionResult, emotionResult) => {
+const crossReferenceOutputs = (transcriptionResult, emotionResult, gptResult = null) => {
   try {
+    // Calcular pontuação consensual (média entre Gemini e GPT se ambos disponíveis)
+    let pontuacaoConsensual = emotionResult.pontuacaoGPT || 0;
+    if (gptResult && typeof gptResult.pontuacaoGPT === 'number') {
+      pontuacaoConsensual = Math.round((emotionResult.pontuacaoGPT + gptResult.pontuacaoGPT) / 2);
+    }
+
     // Cruzar timestamps com análise de emoção
     const crossReferenced = {
       transcription: transcriptionResult.transcription,
@@ -324,10 +331,25 @@ const crossReferenceOutputs = (transcriptionResult, emotionResult) => {
         palavrasCriticas: emotionResult.palavrasCriticas,
         calculoDetalhado: emotionResult.calculoDetalhado
       },
-      analysis: emotionResult.analysis
+      analysis: emotionResult.analysis,
+      // Análise GPT (opcional)
+      gptAnalysis: gptResult ? {
+        criterios: gptResult.criteriosGPT,
+        pontuacao: gptResult.pontuacaoGPT,
+        palavrasCriticas: gptResult.palavrasCriticas,
+        recomendacoes: gptResult.recomendacoes || [],
+        confianca: gptResult.confianca || 0,
+        validacaoGemini: gptResult.validacaoGemini || null,
+        analysis: gptResult.analysis || ''
+      } : null,
+      // Pontuação consensual (média entre Gemini e GPT)
+      pontuacaoConsensual: pontuacaoConsensual
     };
 
     console.log('✅ Outputs cruzados com sucesso');
+    if (gptResult) {
+      console.log(`📊 Pontuação Gemini: ${emotionResult.pontuacaoGPT}, GPT: ${gptResult.pontuacaoGPT}, Consensual: ${pontuacaoConsensual}`);
+    }
     
     return crossReferenced;
   } catch (error) {

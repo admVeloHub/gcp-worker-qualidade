@@ -1,4 +1,4 @@
-// VERSION: v2.2.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+// VERSION: v2.3.0 | DATE: 2025-11-24 | AUTHOR: VeloHub Development Team
 // Worker assíncrono para processamento de áudio via Pub/Sub
 
 const { PubSub } = require('@google-cloud/pubsub');
@@ -13,6 +13,7 @@ const {
   crossReferenceOutputs,
   retryWithExponentialBackoff
 } = require('../config/vertexAI');
+const { analyzeWithGPT } = require('../config/openAIGPT');
 const healthCheckRouter = require('./healthCheck');
 const observatorioRouter = require('./observatorio');
 const { registerWorkerInstances } = healthCheckRouter;
@@ -26,6 +27,7 @@ const PUBSUB_TOPIC_NAME = process.env.PUBSUB_TOPIC_NAME || 'qualidade_audio_envi
 const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3', 10);
 const BACKEND_API_URL = process.env.BACKEND_API_URL || 'http://localhost:3001';
 const PORT = process.env.PORT || 8080;
+const ENABLE_GPT_ANALYSIS = process.env.ENABLE_GPT_ANALYSIS !== 'false'; // Default: true
 
 // Inicializar Pub/Sub
 let pubsub;
@@ -138,18 +140,37 @@ const processAudio = async (gcsUri, fileName) => {
     
     addLog('INFO', `✅ Transcrição concluída: ${transcriptionResult.transcription.length} caracteres`);
     
-    // 2. Analisar emoção e nuance com retry
-    addLog('INFO', '🧠 Passo 2: Analisando emoção e nuance...');
+    // 2. Analisar emoção e nuance com retry (Gemini)
+    addLog('INFO', '🧠 Passo 2: Analisando emoção e nuance com Gemini...');
     const emotionResult = await retryWithExponentialBackoff(
       () => analyzeEmotionAndNuance(transcriptionResult.transcription, transcriptionResult.timestamps),
       MAX_RETRIES
     );
     
-    addLog('INFO', `✅ Análise de emoção concluída. Pontuação: ${emotionResult.pontuacaoGPT}`);
+    addLog('INFO', `✅ Análise Gemini concluída. Pontuação: ${emotionResult.pontuacaoGPT}`);
     
-    // 3. Cruzar outputs
-    addLog('INFO', '🔗 Passo 3: Cruzando outputs...');
-    const crossReferenced = crossReferenceOutputs(transcriptionResult, emotionResult);
+    // 3. Analisar com GPT (opcional)
+    let gptResult = null;
+    if (ENABLE_GPT_ANALYSIS) {
+      try {
+        addLog('INFO', '🤖 Passo 3: Analisando com GPT...');
+        gptResult = await retryWithExponentialBackoff(
+          () => analyzeWithGPT(transcriptionResult.transcription, emotionResult),
+          MAX_RETRIES
+        );
+        addLog('INFO', `✅ Análise GPT concluída. Pontuação: ${gptResult.pontuacaoGPT}`);
+      } catch (error) {
+        addLog('WARN', `⚠️  Análise GPT falhou (continuando com Gemini apenas): ${error.message}`);
+        // Não bloquear processamento se GPT falhar
+        gptResult = null;
+      }
+    } else {
+      addLog('INFO', '⏭️  Análise GPT desabilitada (ENABLE_GPT_ANALYSIS=false)');
+    }
+    
+    // 4. Cruzar outputs (Gemini + GPT se disponível)
+    addLog('INFO', '🔗 Passo 4: Cruzando outputs...');
+    const crossReferenced = crossReferenceOutputs(transcriptionResult, emotionResult, gptResult);
     
     const processingTime = (Date.now() - startTime) / 1000;
     crossReferenced.processingTime = processingTime;
@@ -235,6 +256,8 @@ const processMessage = async (message) => {
         calculoDetalhado: analysisResult.qualityAnalysis.calculoDetalhado,
         analysis: analysisResult.analysis
       },
+      gptAnalysis: analysisResult.gptAnalysis || null,
+      pontuacaoConsensual: analysisResult.pontuacaoConsensual || analysisResult.qualityAnalysis.pontuacao,
       processingTime: analysisResult.processingTime
     });
 
