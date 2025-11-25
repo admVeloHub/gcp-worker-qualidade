@@ -344,7 +344,7 @@ const processMessage = async (message) => {
     });
 
     // 1. Verificar se arquivo já foi processado (ANTES de buscar avaliação)
-    const ResultModel = await AudioAnaliseResult.model();
+    let ResultModel = await AudioAnaliseResult.model();
     const existingResult = await ResultModel.findOne({ nomeArquivo: fileName });
     
     if (existingResult) {
@@ -414,8 +414,7 @@ const processMessage = async (message) => {
     // Processar áudio
     const analysisResult = await processAudio(gcsUri, fileName);
 
-    // Salvar resultado no MongoDB
-    const ResultModel = await AudioAnaliseResult.model();
+    // Salvar resultado no MongoDB (reutilizar ResultModel já declarado acima)
     const audioResult = new ResultModel({
       avaliacaoMonitorId: avaliacao._id,
       nomeArquivo: fileName,
