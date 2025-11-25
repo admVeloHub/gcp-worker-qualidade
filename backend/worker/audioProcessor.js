@@ -1,4 +1,4 @@
-// VERSION: v3.4.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+// VERSION: v3.5.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
 // Worker assíncrono para processamento de áudio via Pub/Sub
 
 // CRÍTICO: Iniciar servidor HTTP IMEDIATAMENTE para Cloud Run
@@ -19,6 +19,11 @@ basicApp.get('/', (req, res) => {
   });
 });
 
+// Variáveis para módulos (serão carregados depois que servidor estiver pronto)
+let PubSub, axios, AudioAnaliseStatus, AudioAnaliseResult, QualidadeAvaliacao;
+let initializeVertexAI, transcribeAudio, analyzeEmotionAndNuance, crossReferenceOutputs, retryWithExponentialBackoff;
+let analyzeWithGPT, healthCheckRouter, observatorioRouter, registerWorkerInstances;
+
 // Iniciar servidor básico IMEDIATAMENTE (antes de qualquer outra coisa)
 let basicServer = null;
 if (require.main === module) {
@@ -26,33 +31,77 @@ if (require.main === module) {
     basicServer = basicApp.listen(PORT, '0.0.0.0', () => {
       console.log(`[${new Date().toISOString()}] [INFO] ✅ Servidor HTTP básico iniciado na porta ${PORT}`);
       console.log(`[${new Date().toISOString()}] [INFO]    - Cloud Run pode verificar saúde`);
+      
+      // IMPORTANTE: Aguardar servidor estar realmente escutando antes de carregar módulos
+      // Usar setImmediate para garantir que o servidor está pronto
+      setImmediate(() => {
+        try {
+          loadWorkerModules();
+        } catch (error) {
+          console.error(`[${new Date().toISOString()}] [ERROR] ❌ Erro ao carregar módulos do worker: ${error.message}`);
+          console.error(error.stack);
+          // Servidor básico continua funcionando mesmo se módulos falharem
+        }
+      });
     });
     
     basicServer.on('error', (error) => {
       console.error(`[${new Date().toISOString()}] [ERROR] ❌ Erro no servidor básico: ${error.message}`);
     });
+    
+    basicServer.on('listening', () => {
+      console.log(`[${new Date().toISOString()}] [INFO] ✅ Servidor HTTP escutando na porta ${PORT}`);
+    });
   } catch (error) {
     console.error(`[${new Date().toISOString()}] [ERROR] ❌ Erro ao iniciar servidor básico: ${error.message}`);
+    console.error(error.stack);
+    process.exit(1); // Se servidor básico falhar, não há o que fazer
   }
 }
 
-// Agora importar outros módulos (podem falhar, mas servidor básico já está rodando)
-const { PubSub } = require('@google-cloud/pubsub');
-const axios = require('axios');
-const AudioAnaliseStatus = require('../models/AudioAnaliseStatus'); // ⚠️ DEPRECATED - mantido para compatibilidade
-const AudioAnaliseResult = require('../models/AudioAnaliseResult');
-const QualidadeAvaliacao = require('../models/QualidadeAvaliacao');
-const {
-  initializeVertexAI,
-  transcribeAudio,
-  analyzeEmotionAndNuance,
-  crossReferenceOutputs,
-  retryWithExponentialBackoff
-} = require('../config/vertexAI');
-const { analyzeWithGPT } = require('../config/openAIGPT');
-const healthCheckRouter = require('./healthCheck');
-const observatorioRouter = require('./observatorio');
-const { registerWorkerInstances } = healthCheckRouter;
+// Função para carregar módulos do worker de forma segura
+function loadWorkerModules() {
+  try {
+    // Importar módulos básicos
+    const pubsubModule = require('@google-cloud/pubsub');
+    PubSub = pubsubModule.PubSub;
+    axios = require('axios');
+    
+    // Importar modelos MongoDB
+    AudioAnaliseStatus = require('../models/AudioAnaliseStatus');
+    AudioAnaliseResult = require('../models/AudioAnaliseResult');
+    QualidadeAvaliacao = require('../models/QualidadeAvaliacao');
+    
+    // Importar configurações Vertex AI
+    const vertexAI = require('../config/vertexAI');
+    initializeVertexAI = vertexAI.initializeVertexAI;
+    transcribeAudio = vertexAI.transcribeAudio;
+    analyzeEmotionAndNuance = vertexAI.analyzeEmotionAndNuance;
+    crossReferenceOutputs = vertexAI.crossReferenceOutputs;
+    retryWithExponentialBackoff = vertexAI.retryWithExponentialBackoff;
+    
+    // Importar OpenAI GPT
+    const openAIGPT = require('../config/openAIGPT');
+    analyzeWithGPT = openAIGPT.analyzeWithGPT;
+    
+    // Importar routers (podem falhar se modelos não estiverem prontos)
+    healthCheckRouter = require('./healthCheck');
+    observatorioRouter = require('./observatorio');
+    registerWorkerInstances = healthCheckRouter.registerWorkerInstances;
+    
+    console.log(`[${new Date().toISOString()}] [INFO] ✅ Módulos do worker carregados com sucesso`);
+    
+    // Adicionar rotas ao servidor básico
+    if (basicServer) {
+      addRoutesToServer();
+      startWorker();
+    }
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] [ERROR] ❌ Erro ao carregar módulos: ${error.message}`);
+    console.error(error.stack);
+    // Servidor básico continua funcionando
+  }
+}
 
 // Carregar dotenv apenas se existir (opcional para Cloud Run)
 try {
@@ -667,19 +716,8 @@ process.on('unhandledRejection', (reason, promise) => {
   // Não fazer exit - deixar servidor HTTP continuar rodando
 });
 
-// Adicionar rotas adicionais ao servidor básico (se servidor básico foi criado)
-if (require.main === module && basicServer) {
-  try {
-    // Adicionar rotas adicionais (health check, observatório)
-    addRoutesToServer();
-  } catch (error) {
-    console.error(`[${new Date().toISOString()}] [ERROR] ❌ Erro ao adicionar rotas: ${error.message}`);
-    // Não fazer exit - servidor básico continua funcionando
-  }
-  
-  // Depois iniciar worker em background
-  startWorker();
-}
+// NOTA: addRoutesToServer() e startWorker() são chamados dentro de loadWorkerModules()
+// que é executado depois que o servidor básico está escutando
 
 module.exports = {
   startWorker,
