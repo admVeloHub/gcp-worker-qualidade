@@ -1,4 +1,4 @@
-// VERSION: v3.1.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+// VERSION: v3.2.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
 // Worker assíncrono para processamento de áudio via Pub/Sub
 
 const { PubSub } = require('@google-cloud/pubsub');
@@ -18,7 +18,13 @@ const { analyzeWithGPT } = require('../config/openAIGPT');
 const healthCheckRouter = require('./healthCheck');
 const observatorioRouter = require('./observatorio');
 const { registerWorkerInstances } = healthCheckRouter;
-require('dotenv').config();
+
+// Carregar dotenv apenas se existir (opcional para Cloud Run)
+try {
+  require('dotenv').config();
+} catch (error) {
+  // Ignorar erro se dotenv não estiver disponível (normal no Cloud Run)
+}
 
 // Configuração
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID;
@@ -505,30 +511,51 @@ const initializeMongoDB = async () => {
  * Iniciar servidor HTTP para health check e observatório
  */
 const startHttpServer = () => {
-  const app = express();
-  
-  // Middleware
-  app.use(express.json());
-  
-  // Rotas
-  app.use('/', healthCheckRouter);
-  app.use('/', observatorioRouter);
-  
-  // Detectar se está rodando no Cloud Run e construir URL base
-  const K_SERVICE = process.env.K_SERVICE;
-  const isCloudRun = !!K_SERVICE;
-  const baseUrl = isCloudRun 
-    ? 'https://worker-qualidade-278491073220.us-east1.run.app'
-    : `http://localhost:${PORT}`;
-  
-  // Iniciar servidor
-  const server = app.listen(PORT, () => {
-    addLog('INFO', `🌐 Servidor HTTP iniciado na porta ${PORT}`);
-    addLog('INFO', `   - Health Check: ${baseUrl}/health`);
-    addLog('INFO', `   - Observatório: ${baseUrl}/observatorio`);
-  });
-  
-  return server;
+  try {
+    const app = express();
+    
+    // Middleware
+    app.use(express.json());
+    
+    // Rota raiz simples para garantir resposta rápida (crítico para Cloud Run)
+    app.get('/', (req, res) => {
+      res.status(200).json({ 
+        status: 'ok', 
+        service: 'audio-worker',
+        timestamp: new Date().toISOString()
+      });
+    });
+    
+    // Rotas
+    app.use('/', healthCheckRouter);
+    app.use('/', observatorioRouter);
+    
+    // Detectar se está rodando no Cloud Run e construir URL base
+    const K_SERVICE = process.env.K_SERVICE;
+    const isCloudRun = !!K_SERVICE;
+    const baseUrl = isCloudRun 
+      ? 'https://worker-qualidade-278491073220.us-east1.run.app'
+      : `http://localhost:${PORT}`;
+    
+    // Iniciar servidor com tratamento de erros
+    const server = app.listen(PORT, '0.0.0.0', () => {
+      console.log(`[${new Date().toISOString()}] [INFO] 🌐 Servidor HTTP iniciado na porta ${PORT}`);
+      console.log(`[${new Date().toISOString()}] [INFO]    - Health Check: ${baseUrl}/health`);
+      console.log(`[${new Date().toISOString()}] [INFO]    - Observatório: ${baseUrl}/observatorio`);
+    });
+    
+    // Tratar erros do servidor
+    server.on('error', (error) => {
+      console.error(`[${new Date().toISOString()}] [ERROR] ❌ Erro no servidor HTTP: ${error.message}`);
+      // Não fazer exit - deixar processo continuar
+    });
+    
+    return server;
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] [ERROR] ❌ Erro ao iniciar servidor HTTP: ${error.message}`);
+    // Não fazer exit - tentar continuar
+    return null;
+  }
 };
 
 /**
@@ -536,10 +563,15 @@ const startHttpServer = () => {
  */
 const startWorker = async () => {
   try {
-    addLog('INFO', '🚀 Iniciando worker...');
-    
     // 1. INICIAR SERVIDOR HTTP PRIMEIRO (crítico para Cloud Run health check)
-    startHttpServer();
+    // Deve ser síncrono e imediato, antes de qualquer outra inicialização
+    const server = startHttpServer();
+    if (!server) {
+      console.error(`[${new Date().toISOString()}] [ERROR] ❌ Falha ao iniciar servidor HTTP`);
+      // Mesmo assim, não fazer exit - Cloud Run pode tentar novamente
+    }
+    
+    addLog('INFO', '🚀 Iniciando worker...');
     addLog('INFO', '✅ Servidor HTTP iniciado - Cloud Run pode verificar saúde');
     
     // 2. Inicializar componentes em background (não bloqueia servidor)
@@ -606,6 +638,18 @@ const startWorker = async () => {
     // O servidor já foi iniciado, então Cloud Run pode fazer health check
   }
 };
+
+// Handlers de erro global para evitar encerramento do processo
+process.on('uncaughtException', (error) => {
+  console.error(`[${new Date().toISOString()}] [ERROR] ❌ Uncaught Exception: ${error.message}`);
+  console.error(error.stack);
+  // Não fazer exit - deixar servidor HTTP continuar rodando
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error(`[${new Date().toISOString()}] [ERROR] ❌ Unhandled Rejection:`, reason);
+  // Não fazer exit - deixar servidor HTTP continuar rodando
+});
 
 // Iniciar worker se executado diretamente
 if (require.main === module) {
