@@ -1,11 +1,12 @@
-// VERSION: v2.3.0 | DATE: 2025-11-24 | AUTHOR: VeloHub Development Team
+// VERSION: v3.0.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
 // Worker assíncrono para processamento de áudio via Pub/Sub
 
 const { PubSub } = require('@google-cloud/pubsub');
 const axios = require('axios');
 const express = require('express');
-const AudioAnaliseStatus = require('../models/AudioAnaliseStatus');
+const AudioAnaliseStatus = require('../models/AudioAnaliseStatus'); // ⚠️ DEPRECATED - mantido para compatibilidade
 const AudioAnaliseResult = require('../models/AudioAnaliseResult');
+const QualidadeAvaliacao = require('../models/QualidadeAvaliacao');
 const {
   initializeVertexAI,
   transcribeAudio,
@@ -96,17 +97,17 @@ const initializePubSub = () => {
 
 /**
  * Notificar backend API sobre conclusão do processamento
- * @param {string} audioId - ID do registro de status
+ * @param {string} avaliacaoId - ID da avaliação
  */
-const notifyBackendCompletion = async (audioId) => {
+const notifyBackendCompletion = async (avaliacaoId) => {
   try {
     const response = await axios.post(`${BACKEND_API_URL}/api/audio-analise/notify-completed`, {
-      audioId: audioId
+      avaliacaoId: avaliacaoId
     }, {
       timeout: 5000
     });
     
-    console.log(`✅ Backend notificado sobre conclusão: ${audioId}`);
+    console.log(`✅ Backend notificado sobre conclusão: ${avaliacaoId}`);
     return response.data;
   } catch (error) {
     console.warn(`⚠️  Erro ao notificar backend (não crítico):`, error.message);
@@ -190,7 +191,7 @@ const processAudio = async (gcsUri, fileName) => {
  */
 const processMessage = async (message) => {
   const messageId = message.id;
-  let audioStatus = null;
+  let avaliacao = null;
   let retryCount = messageRetries.get(messageId) || 0;
   
   try {
@@ -219,21 +220,17 @@ const processMessage = async (message) => {
       startTime: Date.now()
     });
 
-    // Buscar registro de status no MongoDB
-    audioStatus = await AudioAnaliseStatus.findByNomeArquivo(fileName);
+    // Buscar avaliação pelo nomeArquivoAudio no MongoDB
+    const QualidadeAvaliacaoModel = await QualidadeAvaliacao.model();
+    let avaliacao = await QualidadeAvaliacaoModel.findOne({ nomeArquivoAudio: fileName });
     
-    if (!audioStatus) {
-      addLog('WARN', `⚠️  Registro de status não encontrado para: ${fileName}`);
-      // Criar registro se não existir
-      const StatusModel = await AudioAnaliseStatus.model();
-      audioStatus = new StatusModel({
-        nomeArquivo: fileName,
-        sent: true,
-        treated: false
-      });
-      await audioStatus.save();
-      addLog('INFO', `✅ Registro de status criado: ${audioStatus._id}`);
+    if (!avaliacao) {
+      addLog('WARN', `⚠️  Avaliação não encontrada para arquivo: ${fileName}`);
+      // Não criar avaliação automaticamente - deve existir antes do upload
+      throw new Error(`Avaliação não encontrada para arquivo ${fileName}. O arquivo deve estar associado a uma avaliação existente.`);
     }
+    
+    addLog('INFO', `✅ Avaliação encontrada: ${avaliacao._id} para arquivo: ${fileName}`);
 
     // Processar áudio
     const analysisResult = await processAudio(gcsUri, fileName);
@@ -241,7 +238,7 @@ const processMessage = async (message) => {
     // Salvar resultado no MongoDB
     const ResultModel = await AudioAnaliseResult.model();
     const audioResult = new ResultModel({
-      audioStatusId: audioStatus._id,
+      avaliacaoMonitorId: avaliacao._id,
       nomeArquivo: fileName,
       gcsUri: gcsUri,
       transcription: analysisResult.transcription,
@@ -264,12 +261,14 @@ const processMessage = async (message) => {
     await audioResult.save();
     addLog('INFO', `✅ Resultado salvo no MongoDB: ${audioResult._id}`);
 
-    // Atualizar status para treated=true
-    await audioStatus.marcarComoTratado();
-    addLog('INFO', `✅ Status atualizado: treated=true para audioId: ${audioStatus._id}`);
+    // Atualizar audioTreated diretamente na avaliação
+    avaliacao.audioTreated = true;
+    avaliacao.audioUpdatedAt = new Date();
+    await avaliacao.save();
+    addLog('INFO', `✅ Status atualizado: audioTreated=true para avaliacaoId: ${avaliacao._id}`);
 
     // Notificar backend API sobre conclusão (dispara evento SSE)
-    await notifyBackendCompletion(audioStatus._id.toString());
+    await notifyBackendCompletion(avaliacao._id.toString());
 
     // Atualizar estatísticas
     stats.totalProcessed++;
@@ -333,9 +332,9 @@ const processMessage = async (message) => {
         stats.messageHistory.shift();
       }
       
-      // Marcar como erro no status se existir
-      if (audioStatus) {
-        addLog('ERROR', `⚠️  Status não atualizado para audioId: ${audioStatus._id}`);
+      // Marcar como erro na avaliação se existir
+      if (avaliacao) {
+        addLog('ERROR', `⚠️  Status não atualizado para avaliacaoId: ${avaliacao._id}`);
       }
       
       // Nack sem modificar deadline para enviar para DLQ
@@ -360,8 +359,10 @@ const processMessage = async (message) => {
 const initializeMongoDB = async () => {
   try {
     addLog('INFO', '🔄 Inicializando conexão MongoDB...');
+    // AudioAnaliseStatus mantido apenas para compatibilidade durante migração
     await AudioAnaliseStatus.initializeConnection();
     await AudioAnaliseResult.initializeConnection();
+    await QualidadeAvaliacao.initializeConnection();
     addLog('INFO', '✅ MongoDB inicializado com sucesso');
     return true;
   } catch (error) {
