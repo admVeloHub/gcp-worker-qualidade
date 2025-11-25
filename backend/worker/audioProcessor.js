@@ -1,4 +1,4 @@
-// VERSION: v3.2.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+// VERSION: v3.3.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
 // Worker assíncrono para processamento de áudio via Pub/Sub
 
 const { PubSub } = require('@google-cloud/pubsub');
@@ -518,6 +518,7 @@ const startHttpServer = () => {
     app.use(express.json());
     
     // Rota raiz simples para garantir resposta rápida (crítico para Cloud Run)
+    // Esta rota DEVE responder imediatamente para Cloud Run detectar o container
     app.get('/', (req, res) => {
       res.status(200).json({ 
         status: 'ok', 
@@ -526,9 +527,18 @@ const startHttpServer = () => {
       });
     });
     
-    // Rotas
-    app.use('/', healthCheckRouter);
-    app.use('/', observatorioRouter);
+    // Adicionar routers de forma segura (se falharem, servidor continua funcionando)
+    try {
+      app.use('/', healthCheckRouter);
+    } catch (error) {
+      console.error(`[${new Date().toISOString()}] [WARN] ⚠️  Erro ao adicionar healthCheckRouter: ${error.message}`);
+    }
+    
+    try {
+      app.use('/', observatorioRouter);
+    } catch (error) {
+      console.error(`[${new Date().toISOString()}] [WARN] ⚠️  Erro ao adicionar observatorioRouter: ${error.message}`);
+    }
     
     // Detectar se está rodando no Cloud Run e construir URL base
     const K_SERVICE = process.env.K_SERVICE;
@@ -538,8 +548,10 @@ const startHttpServer = () => {
       : `http://localhost:${PORT}`;
     
     // Iniciar servidor com tratamento de erros
+    // IMPORTANTE: Escutar em 0.0.0.0 para aceitar conexões de qualquer interface
     const server = app.listen(PORT, '0.0.0.0', () => {
       console.log(`[${new Date().toISOString()}] [INFO] 🌐 Servidor HTTP iniciado na porta ${PORT}`);
+      console.log(`[${new Date().toISOString()}] [INFO]    - Rota raiz: ${baseUrl}/`);
       console.log(`[${new Date().toISOString()}] [INFO]    - Health Check: ${baseUrl}/health`);
       console.log(`[${new Date().toISOString()}] [INFO]    - Observatório: ${baseUrl}/observatorio`);
     });
@@ -547,12 +559,14 @@ const startHttpServer = () => {
     // Tratar erros do servidor
     server.on('error', (error) => {
       console.error(`[${new Date().toISOString()}] [ERROR] ❌ Erro no servidor HTTP: ${error.message}`);
+      console.error(error.stack);
       // Não fazer exit - deixar processo continuar
     });
     
     return server;
   } catch (error) {
     console.error(`[${new Date().toISOString()}] [ERROR] ❌ Erro ao iniciar servidor HTTP: ${error.message}`);
+    console.error(error.stack);
     // Não fazer exit - tentar continuar
     return null;
   }
@@ -563,16 +577,8 @@ const startHttpServer = () => {
  */
 const startWorker = async () => {
   try {
-    // 1. INICIAR SERVIDOR HTTP PRIMEIRO (crítico para Cloud Run health check)
-    // Deve ser síncrono e imediato, antes de qualquer outra inicialização
-    const server = startHttpServer();
-    if (!server) {
-      console.error(`[${new Date().toISOString()}] [ERROR] ❌ Falha ao iniciar servidor HTTP`);
-      // Mesmo assim, não fazer exit - Cloud Run pode tentar novamente
-    }
-    
     addLog('INFO', '🚀 Iniciando worker...');
-    addLog('INFO', '✅ Servidor HTTP iniciado - Cloud Run pode verificar saúde');
+    addLog('INFO', '✅ Servidor HTTP já iniciado - Cloud Run pode verificar saúde');
     
     // 2. Inicializar componentes em background (não bloqueia servidor)
     // MongoDB
@@ -651,8 +657,20 @@ process.on('unhandledRejection', (reason, promise) => {
   // Não fazer exit - deixar servidor HTTP continuar rodando
 });
 
-// Iniciar worker se executado diretamente
+// Iniciar servidor HTTP IMEDIATAMENTE (antes de qualquer inicialização assíncrona)
+// Isso é crítico para Cloud Run detectar que o container está respondendo
+let httpServer = null;
 if (require.main === module) {
+  try {
+    httpServer = startHttpServer();
+    if (httpServer) {
+      console.log(`[${new Date().toISOString()}] [INFO] ✅ Servidor HTTP iniciado imediatamente na porta ${PORT}`);
+    }
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] [ERROR] ❌ Erro ao iniciar servidor HTTP: ${error.message}`);
+  }
+  
+  // Depois iniciar worker em background
   startWorker();
 }
 
