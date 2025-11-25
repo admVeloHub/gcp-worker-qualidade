@@ -1,4 +1,4 @@
-// VERSION: v3.0.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+// VERSION: v3.1.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
 // Worker assíncrono para processamento de áudio via Pub/Sub
 
 const { PubSub } = require('@google-cloud/pubsub');
@@ -93,6 +93,40 @@ const initializePubSub = () => {
     console.error('❌ Erro ao inicializar Pub/Sub:', error);
     throw error;
   }
+};
+
+/**
+ * Classificar erro como recuperável ou não recuperável
+ * @param {Error} error - Erro a ser classificado
+ * @returns {boolean} true se recuperável, false se não recuperável
+ */
+const isRecoverableError = (error) => {
+  const errorMessage = error.message.toLowerCase();
+  
+  // Erros não recuperáveis - não devem ser retentados
+  // Fazer ack() imediatamente para remover da fila
+  const nonRecoverablePatterns = [
+    'avaliação não encontrada',
+    'arquivo deve estar associado',
+    'já foi processado',
+    'validation error',
+    'invalid data'
+  ];
+  
+  if (nonRecoverablePatterns.some(pattern => errorMessage.includes(pattern))) {
+    return false;
+  }
+  
+  // Erros recuperáveis - podem ser retentados
+  const recoverablePatterns = [
+    'network',
+    'timeout',
+    'connection',
+    'temporary',
+    'service unavailable'
+  ];
+  
+  return recoverablePatterns.some(pattern => errorMessage.includes(pattern));
 };
 
 /**
@@ -220,14 +254,70 @@ const processMessage = async (message) => {
       startTime: Date.now()
     });
 
-    // Buscar avaliação pelo nomeArquivoAudio no MongoDB
+    // 1. Verificar se arquivo já foi processado (ANTES de buscar avaliação)
+    const ResultModel = await AudioAnaliseResult.model();
+    const existingResult = await ResultModel.findOne({ nomeArquivo: fileName });
+    
+    if (existingResult) {
+      addLog('INFO', `ℹ️  Arquivo ${fileName} já foi processado anteriormente. Ignorando.`);
+      // Limpar contador de retries e mensagem em processamento
+      messageRetries.delete(messageId);
+      stats.processingMessages.delete(messageId);
+      // Confirmar mensagem (arquivo já processado - não reprocessar)
+      message.ack();
+      return;
+    }
+
+    // 2. Buscar avaliação pelo nomeArquivoAudio no MongoDB (já preenchido no upload)
     const QualidadeAvaliacaoModel = await QualidadeAvaliacao.model();
-    let avaliacao = await QualidadeAvaliacaoModel.findOne({ nomeArquivoAudio: fileName });
+    avaliacao = await QualidadeAvaliacaoModel.findOne({ nomeArquivoAudio: fileName });
     
     if (!avaliacao) {
       addLog('WARN', `⚠️  Avaliação não encontrada para arquivo: ${fileName}`);
-      // Não criar avaliação automaticamente - deve existir antes do upload
-      throw new Error(`Avaliação não encontrada para arquivo ${fileName}. O arquivo deve estar associado a uma avaliação existente.`);
+      // Erro não recuperável - fazer ack() imediatamente para remover da fila
+      const error = new Error(`Avaliação não encontrada para arquivo ${fileName}. O arquivo deve estar associado a uma avaliação existente.`);
+      
+      // Atualizar estatísticas
+      stats.totalProcessed++;
+      stats.totalFailed++;
+      
+      // Adicionar ao histórico
+      const processingInfo = stats.processingMessages.get(messageId);
+      const processingTime = processingInfo ? (Date.now() - processingInfo.startTime) / 1000 : 0;
+      
+      stats.messageHistory.push({
+        messageId,
+        fileName,
+        status: 'failed',
+        error: error.message,
+        processingTime,
+        timestamp: new Date().toISOString()
+      });
+      
+      // Manter apenas últimas 50 mensagens
+      if (stats.messageHistory.length > 50) {
+        stats.messageHistory.shift();
+      }
+      
+      // Limpar contador de retries e mensagem em processamento
+      messageRetries.delete(messageId);
+      stats.processingMessages.delete(messageId);
+      
+      // Fazer ack() imediatamente (erro não recuperável)
+      message.ack();
+      addLog('INFO', `✅ Mensagem removida da fila (erro não recuperável) [ID: ${messageId}]`);
+      return;
+    }
+    
+    // 3. Verificar se avaliação já foi processada
+    if (avaliacao.audioTreated) {
+      addLog('INFO', `ℹ️  Arquivo ${fileName} já foi processado para avaliação ${avaliacao._id}. Ignorando.`);
+      // Limpar contador de retries e mensagem em processamento
+      messageRetries.delete(messageId);
+      stats.processingMessages.delete(messageId);
+      // Confirmar mensagem (já processado - não reprocessar)
+      message.ack();
+      return;
     }
     
     addLog('INFO', `✅ Avaliação encontrada: ${avaliacao._id} para arquivo: ${fileName}`);
@@ -303,10 +393,50 @@ const processMessage = async (message) => {
   } catch (error) {
     addLog('ERROR', `❌ Erro ao processar mensagem [ID: ${messageId}]: ${error.message}`);
     
+    // Classificar erro como recuperável ou não recuperável
+    const isRecoverable = isRecoverableError(error);
+    
+    if (!isRecoverable) {
+      // Erro não recuperável - fazer ack() imediatamente para remover da fila
+      addLog('WARN', `⚠️  Erro não recuperável detectado. Removendo mensagem da fila.`);
+      
+      // Atualizar estatísticas
+      stats.totalProcessed++;
+      stats.totalFailed++;
+      
+      // Adicionar ao histórico
+      const processingInfo = stats.processingMessages.get(messageId);
+      const processingTime = processingInfo ? (Date.now() - processingInfo.startTime) / 1000 : 0;
+      
+      stats.messageHistory.push({
+        messageId,
+        fileName: processingInfo?.fileName || 'unknown',
+        status: 'failed',
+        error: error.message,
+        processingTime,
+        timestamp: new Date().toISOString()
+      });
+      
+      // Manter apenas últimas 50 mensagens
+      if (stats.messageHistory.length > 50) {
+        stats.messageHistory.shift();
+      }
+      
+      // Limpar contador de retries e mensagem em processamento
+      messageRetries.delete(messageId);
+      stats.processingMessages.delete(messageId);
+      
+      // Fazer ack() imediatamente (erro não recuperável)
+      message.ack();
+      addLog('INFO', `✅ Mensagem removida da fila (erro não recuperável) [ID: ${messageId}]`);
+      return;
+    }
+    
+    // Erro recuperável - fazer retry até MAX_RETRIES
     retryCount++;
     messageRetries.set(messageId, retryCount);
     
-    // Se excedeu máximo de retries, enviar para Dead Letter Queue ou marcar como erro
+    // Se excedeu máximo de retries, enviar para Dead Letter Queue
     if (retryCount >= MAX_RETRIES) {
       addLog('ERROR', `❌ Máximo de tentativas excedido para mensagem [ID: ${messageId}]. Enviando para DLQ.`);
       
