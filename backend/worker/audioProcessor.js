@@ -1,9 +1,44 @@
-// VERSION: v3.3.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+// VERSION: v3.4.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
 // Worker assíncrono para processamento de áudio via Pub/Sub
 
+// CRÍTICO: Iniciar servidor HTTP IMEDIATAMENTE para Cloud Run
+// Isso deve acontecer antes de qualquer import que possa falhar
+const express = require('express');
+const PORT = process.env.PORT || 8080;
+
+// Criar servidor Express básico IMEDIATAMENTE
+const basicApp = express();
+basicApp.use(express.json());
+
+// Rota raiz simples - DEVE responder imediatamente para Cloud Run
+basicApp.get('/', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok', 
+    service: 'audio-worker',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Iniciar servidor básico IMEDIATAMENTE (antes de qualquer outra coisa)
+let basicServer = null;
+if (require.main === module) {
+  try {
+    basicServer = basicApp.listen(PORT, '0.0.0.0', () => {
+      console.log(`[${new Date().toISOString()}] [INFO] ✅ Servidor HTTP básico iniciado na porta ${PORT}`);
+      console.log(`[${new Date().toISOString()}] [INFO]    - Cloud Run pode verificar saúde`);
+    });
+    
+    basicServer.on('error', (error) => {
+      console.error(`[${new Date().toISOString()}] [ERROR] ❌ Erro no servidor básico: ${error.message}`);
+    });
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] [ERROR] ❌ Erro ao iniciar servidor básico: ${error.message}`);
+  }
+}
+
+// Agora importar outros módulos (podem falhar, mas servidor básico já está rodando)
 const { PubSub } = require('@google-cloud/pubsub');
 const axios = require('axios');
-const express = require('express');
 const AudioAnaliseStatus = require('../models/AudioAnaliseStatus'); // ⚠️ DEPRECATED - mantido para compatibilidade
 const AudioAnaliseResult = require('../models/AudioAnaliseResult');
 const QualidadeAvaliacao = require('../models/QualidadeAvaliacao');
@@ -33,7 +68,6 @@ const PUBSUB_SUBSCRIPTION_NAME = process.env.PUBSUB_SUBSCRIPTION_NAME || 'upload
 const PUBSUB_TOPIC_NAME = process.env.PUBSUB_TOPIC_NAME || 'qualidade_audio_envio';
 const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3', 10);
 const BACKEND_API_URL = process.env.BACKEND_API_URL || 'http://localhost:3001';
-const PORT = process.env.PORT || 8080;
 const ENABLE_GPT_ANALYSIS = process.env.ENABLE_GPT_ANALYSIS !== 'false'; // Default: true
 
 // Inicializar Pub/Sub
@@ -508,34 +542,21 @@ const initializeMongoDB = async () => {
 };
 
 /**
- * Iniciar servidor HTTP para health check e observatório
+ * Adicionar rotas adicionais ao servidor básico já criado
  */
-const startHttpServer = () => {
+const addRoutesToServer = () => {
   try {
-    const app = express();
-    
-    // Middleware
-    app.use(express.json());
-    
-    // Rota raiz simples para garantir resposta rápida (crítico para Cloud Run)
-    // Esta rota DEVE responder imediatamente para Cloud Run detectar o container
-    app.get('/', (req, res) => {
-      res.status(200).json({ 
-        status: 'ok', 
-        service: 'audio-worker',
-        timestamp: new Date().toISOString()
-      });
-    });
-    
-    // Adicionar routers de forma segura (se falharem, servidor continua funcionando)
+    // Adicionar routers de forma segura (se falharem, servidor básico continua funcionando)
     try {
-      app.use('/', healthCheckRouter);
+      basicApp.use('/', healthCheckRouter);
+      console.log(`[${new Date().toISOString()}] [INFO] ✅ Health check router adicionado`);
     } catch (error) {
       console.error(`[${new Date().toISOString()}] [WARN] ⚠️  Erro ao adicionar healthCheckRouter: ${error.message}`);
     }
     
     try {
-      app.use('/', observatorioRouter);
+      basicApp.use('/', observatorioRouter);
+      console.log(`[${new Date().toISOString()}] [INFO] ✅ Observatório router adicionado`);
     } catch (error) {
       console.error(`[${new Date().toISOString()}] [WARN] ⚠️  Erro ao adicionar observatorioRouter: ${error.message}`);
     }
@@ -547,28 +568,17 @@ const startHttpServer = () => {
       ? 'https://worker-qualidade-278491073220.us-east1.run.app'
       : `http://localhost:${PORT}`;
     
-    // Iniciar servidor com tratamento de erros
-    // IMPORTANTE: Escutar em 0.0.0.0 para aceitar conexões de qualquer interface
-    const server = app.listen(PORT, '0.0.0.0', () => {
-      console.log(`[${new Date().toISOString()}] [INFO] 🌐 Servidor HTTP iniciado na porta ${PORT}`);
-      console.log(`[${new Date().toISOString()}] [INFO]    - Rota raiz: ${baseUrl}/`);
-      console.log(`[${new Date().toISOString()}] [INFO]    - Health Check: ${baseUrl}/health`);
-      console.log(`[${new Date().toISOString()}] [INFO]    - Observatório: ${baseUrl}/observatorio`);
-    });
+    console.log(`[${new Date().toISOString()}] [INFO] 🌐 Servidor HTTP completo na porta ${PORT}`);
+    console.log(`[${new Date().toISOString()}] [INFO]    - Rota raiz: ${baseUrl}/`);
+    console.log(`[${new Date().toISOString()}] [INFO]    - Health Check: ${baseUrl}/health`);
+    console.log(`[${new Date().toISOString()}] [INFO]    - Observatório: ${baseUrl}/observatorio`);
     
-    // Tratar erros do servidor
-    server.on('error', (error) => {
-      console.error(`[${new Date().toISOString()}] [ERROR] ❌ Erro no servidor HTTP: ${error.message}`);
-      console.error(error.stack);
-      // Não fazer exit - deixar processo continuar
-    });
-    
-    return server;
+    return basicServer;
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] [ERROR] ❌ Erro ao iniciar servidor HTTP: ${error.message}`);
+    console.error(`[${new Date().toISOString()}] [ERROR] ❌ Erro ao adicionar rotas: ${error.message}`);
     console.error(error.stack);
-    // Não fazer exit - tentar continuar
-    return null;
+    // Não fazer exit - servidor básico continua funcionando
+    return basicServer;
   }
 };
 
@@ -657,17 +667,14 @@ process.on('unhandledRejection', (reason, promise) => {
   // Não fazer exit - deixar servidor HTTP continuar rodando
 });
 
-// Iniciar servidor HTTP IMEDIATAMENTE (antes de qualquer inicialização assíncrona)
-// Isso é crítico para Cloud Run detectar que o container está respondendo
-let httpServer = null;
-if (require.main === module) {
+// Adicionar rotas adicionais ao servidor básico (se servidor básico foi criado)
+if (require.main === module && basicServer) {
   try {
-    httpServer = startHttpServer();
-    if (httpServer) {
-      console.log(`[${new Date().toISOString()}] [INFO] ✅ Servidor HTTP iniciado imediatamente na porta ${PORT}`);
-    }
+    // Adicionar rotas adicionais (health check, observatório)
+    addRoutesToServer();
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] [ERROR] ❌ Erro ao iniciar servidor HTTP: ${error.message}`);
+    console.error(`[${new Date().toISOString()}] [ERROR] ❌ Erro ao adicionar rotas: ${error.message}`);
+    // Não fazer exit - servidor básico continua funcionando
   }
   
   // Depois iniciar worker em background
