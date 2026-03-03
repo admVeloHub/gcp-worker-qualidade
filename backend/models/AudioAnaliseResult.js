@@ -77,6 +77,7 @@ const criteriosQualidadeSchema = new mongoose.Schema({
   dominioAssunto: { type: Boolean, default: false },
   empatiaCordialidade: { type: Boolean, default: false },
   direcionouPesquisa: { type: Boolean, default: false },
+  naoConsultouBot: { type: Boolean, default: false },  // Copiado da avaliação manual
   procedimentoIncorreto: { type: Boolean, default: false },
   encerramentoBrusco: { type: Boolean, default: false }
 }, { _id: false });

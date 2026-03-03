@@ -1,7 +1,7 @@
-// VERSION: v1.5.0 | DATE: 2025-11-24 | AUTHOR: VeloHub Development Team
+// VERSION: v1.7.0 | DATE: 2025-02-11 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v1.7.0 - Atualização de métricas: pontuações atualizadas, removidos critérios não verificáveis pela IA (registroAtendimento, naoConsultouBot, conformidadeTicket)
 const speech = require('@google-cloud/speech');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-const { getSecret } = require('./secrets');
+const { VertexAI } = require('@google-cloud/vertexai');
 
 // Configuração
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID;
@@ -10,8 +10,7 @@ const GCS_BUCKET_NAME = process.env.GCS_BUCKET_NAME;
 
 // Inicializar clientes
 let speechClient;
-let genAI;
-let geminiApiKey;
+let vertexAI;
 
 /**
  * Detectar encoding de áudio baseado na extensão do arquivo
@@ -58,29 +57,16 @@ const initializeVertexAI = async () => {
       });
     }
 
-    // Buscar GEMINI_API_KEY - verificar env var primeiro, depois Secret Manager
-    if (!geminiApiKey) {
-      if (process.env.GEMINI_API_KEY) {
-        geminiApiKey = process.env.GEMINI_API_KEY;
-        console.log('✅ GEMINI_API_KEY encontrada em variáveis de ambiente');
-      } else {
-        try {
-          geminiApiKey = await getSecret('GEMINI_API_KEY');
-        } catch (error) {
-          throw new Error(`Falha ao buscar GEMINI_API_KEY do Secret Manager: ${error.message}`);
-        }
-      }
+    // Inicializar Vertex AI (usa Application Default Credentials automaticamente)
+    if (!vertexAI) {
+      vertexAI = new VertexAI({
+        project: GCP_PROJECT_ID,
+        location: GCP_LOCATION
+      });
+      console.log(`✅ Vertex AI inicializado (Project: ${GCP_PROJECT_ID}, Location: ${GCP_LOCATION})`);
     }
 
-    // Inicializar Gemini AI
-    if (!genAI && geminiApiKey) {
-      genAI = new GoogleGenerativeAI(geminiApiKey);
-    } else if (!genAI) {
-      throw new Error('GEMINI_API_KEY deve estar configurada no Secret Manager');
-    }
-
-    console.log('✅ Vertex AI inicializado');
-    return { speechClient, genAI };
+    return { speechClient, genAI: vertexAI };
   } catch (error) {
     console.error('❌ Erro ao inicializar Vertex AI:', error);
     throw error;
@@ -171,7 +157,7 @@ const transcribeAudio = async (gcsUri, fileName, languageCode = 'pt-BR') => {
  */
 const analyzeEmotionAndNuance = async (transcription, timestamps) => {
   try {
-    if (!genAI) {
+    if (!vertexAI) {
       await initializeVertexAI();
     }
 
@@ -193,30 +179,38 @@ Analise a seguinte transcrição de uma ligação de atendimento e forneça:
    - escutaAtiva: Demonstrou escuta ativa e fez perguntas relevantes?
    - clarezaObjetividade: Foi claro e objetivo na comunicação?
    - resolucaoQuestao: Resolveu a questão seguindo procedimentos?
-   - dominioAssunto: Demonstrou conhecimento sobre o assunto?
    - empatiaCordialidade: Demonstrou empatia e cordialidade?
    - direcionouPesquisa: Direcionou para pesquisa de satisfação?
    - procedimentoIncorreto: Repassou informação incorreta? (true = negativo)
    - encerramentoBrusco: Encerrou o contato de forma brusca? (true = negativo)
 
+   IMPORTANTE - CRITÉRIOS NÃO VERIFICÁVEIS PELA IA:
+   Os seguintes critérios NÃO devem ser avaliados pela IA, pois serão copiados automaticamente da avaliação manual:
+   - registroAtendimento: Anotação interna não presente na transcrição do áudio
+   - naoConsultouBot: Não é possível verificar pela transcrição se o bot foi consultado
+   - conformidadeTicket: Erro de tabulação ou resposta incoerente não verificável apenas pela transcrição
+   
+   Estes critérios devem sempre ser false na resposta da IA e serão adicionados posteriormente copiando da avaliação manual.
+
 3. PONTUAÇÃO:
-   Calcule a pontuação baseado nos critérios abaixo. A pontuação pode variar de -160 a 100 pontos:
+   Calcule a pontuação baseado apenas nos critérios verificáveis acima. A pontuação pode variar de -200 a 85 pontos (sem incluir os critérios não verificáveis):
    
    CRITÉRIOS POSITIVOS (somam pontos):
-   - saudacaoAdequada: +10 pontos
-   - escutaAtiva: +15 pontos
+   - saudacaoAdequada: +5 pontos
+   - escutaAtiva: +10 pontos
    - clarezaObjetividade: +10 pontos
-   - resolucaoQuestao: +25 pontos
-   - dominioAssunto: +15 pontos
-   - empatiaCordialidade: +15 pontos
+   - resolucaoQuestao: +40 pontos
+   - empatiaCordialidade: +10 pontos
    - direcionouPesquisa: +10 pontos
    
    CRITÉRIOS NEGATIVOS (subtraem pontos):
+   - procedimentoIncorreto: -100 pontos (se o colaborador repassou um procedimento incorreto)
    - encerramentoBrusco: -100 pontos (se o colaborador encerrou o contato de forma brusca ou derrubou a ligação)
-   - procedimentoIncorreto: -60 pontos (se o colaborador repassou um procedimento incorreto)
    
-   IMPORTANTE: Some todos os critérios positivos que forem true e subtraia os critérios negativos que forem true.
-   A pontuação final pode ser negativa se houver critérios negativos.
+   IMPORTANTE: 
+   - Some todos os critérios positivos que forem true e subtraia os critérios negativos que forem true.
+   - A pontuação final pode ser negativa se houver critérios negativos, mas será limitada a 0 no cálculo final.
+   - NÃO inclua registroAtendimento, naoConsultouBot ou conformidadeTicket no cálculo da pontuação - estes critérios serão copiados da avaliação manual.
 
 4. PALAVRAS-CHAVE CRÍTICAS:
    Você DEVE buscar especificamente pelas seguintes palavras ou frases na transcrição:
@@ -248,7 +242,6 @@ Retorne um JSON com a seguinte estrutura:
     "escutaAtiva": boolean,
     "clarezaObjetividade": boolean,
     "resolucaoQuestao": boolean,
-    "dominioAssunto": boolean,
     "empatiaCordialidade": boolean,
     "direcionouPesquisa": boolean,
     "procedimentoIncorreto": boolean,
@@ -268,14 +261,21 @@ Retorne um JSON com a seguinte estrutura:
     "tensao": number
   }
 }
+
+NOTA IMPORTANTE: Os campos "registroAtendimento", "naoConsultouBot" e "conformidadeTicket" NÃO devem estar em criteriosGPT, pois serão adicionados posteriormente copiando da avaliação manual do avaliador humano.
 `;
 
-    // Usar Gemini para análise (já inicializado acima)
-
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-pro' });
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
+    // Usar Vertex AI para análise (usa credenciais do GCP automaticamente)
+    const model = vertexAI.getGenerativeModel({
+      model: 'gemini-2.5-pro',
+    });
+    
+    const result = await model.generateContent({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    });
+    
+    const response = result.response;
+    const text = response.candidates[0].content.parts[0].text;
 
     // Extrair JSON da resposta
     const jsonMatch = text.match(/\{[\s\S]*\}/);

@@ -414,6 +414,68 @@ const processMessage = async (message) => {
     // Processar áudio
     const analysisResult = await processAudio(gcsUri, fileName);
 
+    // Copiar critérios não verificáveis pela IA da avaliação manual
+    // (A IA não pode determinar registroAtendimento, naoConsultouBot e conformidadeTicket)
+    const copiarCritériosNaoVerificaveis = (criterios) => {
+      // Copiar registroAtendimento (substitui dominioAssunto)
+      if (avaliacao.registroAtendimento !== undefined && avaliacao.registroAtendimento !== null) {
+        criterios.registroAtendimento = Boolean(avaliacao.registroAtendimento);
+      } else if (avaliacao.dominioAssunto !== undefined && avaliacao.dominioAssunto !== null) {
+        // Compatibilidade retroativa
+        criterios.registroAtendimento = Boolean(avaliacao.dominioAssunto);
+      }
+      
+      // Copiar naoConsultouBot
+      if (avaliacao.naoConsultouBot !== undefined && avaliacao.naoConsultouBot !== null) {
+        criterios.naoConsultouBot = Boolean(avaliacao.naoConsultouBot);
+      }
+      
+      // Copiar conformidadeTicket
+      if (avaliacao.conformidadeTicket !== undefined && avaliacao.conformidadeTicket !== null) {
+        criterios.conformidadeTicket = Boolean(avaliacao.conformidadeTicket);
+      }
+    };
+    
+    // Função para calcular pontuação com novas métricas
+    const calcularPontuacao = (criterios) => {
+      let total = 0;
+      // Critérios positivos
+      if (criterios.saudacaoAdequada) total += 5;
+      if (criterios.escutaAtiva) total += 10; // Atualizado de 15 para 10
+      if (criterios.clarezaObjetividade) total += 10; // Atualizado de 15 para 10
+      if (criterios.resolucaoQuestao) total += 40;
+      // registroAtendimento (substitui dominioAssunto) - copiado da avaliação manual
+      if (criterios.registroAtendimento) total += 15;
+      if (criterios.dominioAssunto) total += 15; // Compatibilidade retroativa
+      if (criterios.empatiaCordialidade) total += 10; // Atualizado de 15 para 10
+      if (criterios.direcionouPesquisa) total += 10;
+      // Critérios detratoras
+      if (criterios.naoConsultouBot) total -= 10; // Copiado da avaliação manual
+      if (criterios.conformidadeTicket) total -= 15; // Copiado da avaliação manual
+      if (criterios.procedimentoIncorreto) total -= 100; // Atualizado de -60 para -100
+      if (criterios.encerramentoBrusco) total -= 100;
+      return Math.max(0, total);
+    };
+    
+    // Copiar critérios não verificáveis e recalcular pontuação para qualityAnalysis (Gemini)
+    if (analysisResult.qualityAnalysis && analysisResult.qualityAnalysis.criterios) {
+      copiarCritériosNaoVerificaveis(analysisResult.qualityAnalysis.criterios);
+      analysisResult.qualityAnalysis.pontuacao = calcularPontuacao(analysisResult.qualityAnalysis.criterios);
+    }
+    
+    // Copiar critérios não verificáveis e recalcular pontuação para gptAnalysis se existir
+    if (analysisResult.gptAnalysis && analysisResult.gptAnalysis.criterios) {
+      copiarCritériosNaoVerificaveis(analysisResult.gptAnalysis.criterios);
+      analysisResult.gptAnalysis.pontuacao = calcularPontuacao(analysisResult.gptAnalysis.criterios);
+    }
+      // Recalcular pontuação consensual se necessário
+      if (analysisResult.pontuacaoConsensual !== undefined) {
+        const pontuacaoGemini = analysisResult.qualityAnalysis?.pontuacao || 0;
+        const pontuacaoGPT = analysisResult.gptAnalysis?.pontuacao || pontuacaoGemini;
+        analysisResult.pontuacaoConsensual = Math.round((pontuacaoGemini + pontuacaoGPT) / 2);
+      }
+    }
+
     // Salvar resultado no MongoDB (reutilizar ResultModel já declarado acima)
     const audioResult = new ResultModel({
       avaliacaoMonitorId: avaliacao._id,

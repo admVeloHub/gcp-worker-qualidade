@@ -78,18 +78,25 @@ Por favor, valide ou complemente esta análise com sua própria avaliação. Se 
 CRITÉRIOS DE QUALIDADE:
 Avalie cada critério abaixo como true ou false baseado na transcrição:
 
-- saudacaoAdequada: O colaborador cumprimentou adequadamente? (+10 pontos se true)
-- escutaAtiva: Demonstrou escuta ativa e fez perguntas relevantes? (+15 pontos se true)
+- saudacaoAdequada: O colaborador cumprimentou adequadamente? (+5 pontos se true)
+- escutaAtiva: Demonstrou escuta ativa e fez perguntas relevantes? (+10 pontos se true)
 - clarezaObjetividade: Foi claro e objetivo na comunicação? (+10 pontos se true)
-- resolucaoQuestao: Resolveu a questão seguindo procedimentos? (+25 pontos se true)
-- dominioAssunto: Demonstrou conhecimento sobre o assunto? (+15 pontos se true)
-- empatiaCordialidade: Demonstrou empatia e cordialidade? (+15 pontos se true)
+- resolucaoQuestao: Resolveu a questão seguindo procedimentos? (+40 pontos se true)
+- empatiaCordialidade: Demonstrou empatia e cordialidade? (+10 pontos se true)
 - direcionouPesquisa: Direcionou para pesquisa de satisfação? (+10 pontos se true)
-- procedimentoIncorreto: Repassou informação incorreta? (-60 pontos se true)
+- procedimentoIncorreto: Repassou informação incorreta? (-100 pontos se true)
 - encerramentoBrusco: Encerrou o contato de forma brusca ou derrubou a ligação? (-100 pontos se true)
 
+IMPORTANTE - CRITÉRIOS NÃO VERIFICÁVEIS PELA IA:
+Os seguintes critérios NÃO devem ser avaliados pela IA, pois serão copiados automaticamente da avaliação manual do avaliador humano:
+- registroAtendimento: Anotação interna não presente na transcrição do áudio
+- naoConsultouBot: Não é possível verificar pela transcrição se o bot foi consultado
+- conformidadeTicket: Erro de tabulação ou resposta incoerente não verificável apenas pela transcrição
+
+Estes critérios devem sempre ser false na resposta da IA e serão adicionados posteriormente copiando da avaliação manual.
+
 PONTUAÇÃO:
-Calcule a pontuação baseado nos critérios acima. A pontuação pode variar de -160 a 100 pontos.
+Calcule a pontuação baseado apenas nos critérios verificáveis acima. A pontuação pode variar de -200 a 85 pontos (sem incluir os critérios não verificáveis).
 
 PALAVRAS-CHAVE CRÍTICAS:
 Você DEVE buscar especificamente pelas seguintes palavras ou frases na transcrição:
@@ -118,7 +125,6 @@ Retorne um JSON com a seguinte estrutura:
     "escutaAtiva": boolean,
     "clarezaObjetividade": boolean,
     "resolucaoQuestao": boolean,
-    "dominioAssunto": boolean,
     "empatiaCordialidade": boolean,
     "direcionouPesquisa": boolean,
     "procedimentoIncorreto": boolean,
@@ -130,6 +136,8 @@ Retorne um JSON com a seguinte estrutura:
   "confianca": number,
   "validacaoGemini": ${geminiAnalysis ? '{"concorda": boolean, "diferencas": ["diferença1", "diferença2"]}' : 'null'}
 }
+
+NOTA: Os critérios registroAtendimento, naoConsultouBot e conformidadeTicket NÃO devem estar em criteriosGPT, pois serão adicionados posteriormente copiando da avaliação manual.
 `;
 
     const response = await openaiClient.chat.completions.create({

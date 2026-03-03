@@ -1,4 +1,5 @@
-// VERSION: v1.0.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+// VERSION: v1.1.0 | DATE: 2025-02-11 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v1.1.0 - Substituído dominioAssunto por registroAtendimento, adicionado conformidadeTicket -15pts
 const mongoose = require('mongoose');
 const { getSecret } = require('../config/secrets');
 
@@ -121,9 +122,25 @@ const qualidadeAvaliacaoSchema = new mongoose.Schema({
     type: Boolean,
     required: true
   },
+  registroAtendimento: {
+    type: Boolean,
+    required: true,
+    default: false
+  },
   dominioAssunto: {
     type: Boolean,
-    required: true
+    required: false, // Deprecated - manter para compatibilidade retroativa
+    default: false
+  },
+  naoConsultouBot: {
+    type: Boolean,
+    required: true,
+    default: false
+  },
+  conformidadeTicket: {
+    type: Boolean,
+    required: true,
+    default: false
   },
   observacoes: {
     type: String,
