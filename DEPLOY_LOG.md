@@ -7,6 +7,7 @@
 **Versão:** Atualizações nos modelos e configurações  
 **Repositório:** admVeloHub/gcp-worker-qualidade  
 **Branch:** main  
+**Commit:** 5af4f6e  
 
 ### Descrição:
 Atualizações nos modelos e configurações do worker de processamento de áudio:
