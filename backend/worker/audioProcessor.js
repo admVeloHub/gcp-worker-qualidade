@@ -1,4 +1,5 @@
-// VERSION: v3.5.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+// VERSION: v3.5.1 | DATE: 2025-03-03 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v3.5.1 - Correção erro de sintaxe: removido } extra e corrigida indentação no cálculo de pontuação consensual
 // Worker assíncrono para processamento de áudio via Pub/Sub
 
 // CRÍTICO: Iniciar servidor HTTP IMEDIATAMENTE para Cloud Run
@@ -468,12 +469,12 @@ const processMessage = async (message) => {
       copiarCritériosNaoVerificaveis(analysisResult.gptAnalysis.criterios);
       analysisResult.gptAnalysis.pontuacao = calcularPontuacao(analysisResult.gptAnalysis.criterios);
     }
-      // Recalcular pontuação consensual se necessário
-      if (analysisResult.pontuacaoConsensual !== undefined) {
-        const pontuacaoGemini = analysisResult.qualityAnalysis?.pontuacao || 0;
-        const pontuacaoGPT = analysisResult.gptAnalysis?.pontuacao || pontuacaoGemini;
-        analysisResult.pontuacaoConsensual = Math.round((pontuacaoGemini + pontuacaoGPT) / 2);
-      }
+    
+    // Recalcular pontuação consensual se necessário
+    if (analysisResult.pontuacaoConsensual !== undefined) {
+      const pontuacaoGemini = analysisResult.qualityAnalysis?.pontuacao || 0;
+      const pontuacaoGPT = analysisResult.gptAnalysis?.pontuacao || pontuacaoGemini;
+      analysisResult.pontuacaoConsensual = Math.round((pontuacaoGemini + pontuacaoGPT) / 2);
     }
 
     // Salvar resultado no MongoDB (reutilizar ResultModel já declarado acima)
