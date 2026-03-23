@@ -1,4 +1,5 @@
-// VERSION: v3.5.1 | DATE: 2025-03-03 | AUTHOR: VeloHub Development Team
+// VERSION: v3.6.0 | DATE: 2026-03-20 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v3.6.0 - Buffer de logs do observatório: 50 linhas; GPT só com ENABLE_GPT_ANALYSIS=true (default off)
 // CHANGELOG: v3.5.1 - Correção erro de sintaxe: removido } extra e corrigida indentação no cálculo de pontuação consensual
 // Worker assíncrono para processamento de áudio via Pub/Sub
 
@@ -118,7 +119,8 @@ const PUBSUB_SUBSCRIPTION_NAME = process.env.PUBSUB_SUBSCRIPTION_NAME || 'upload
 const PUBSUB_TOPIC_NAME = process.env.PUBSUB_TOPIC_NAME || 'qualidade_audio_envio';
 const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3', 10);
 const BACKEND_API_URL = process.env.BACKEND_API_URL || 'http://localhost:3001';
-const ENABLE_GPT_ANALYSIS = process.env.ENABLE_GPT_ANALYSIS !== 'false'; // Default: true
+// Só envia para GPT/OpenAI quando ENABLE_GPT_ANALYSIS=true explicitamente (default: não enviar)
+const ENABLE_GPT_ANALYSIS = process.env.ENABLE_GPT_ANALYSIS === 'true';
 
 // Inicializar Pub/Sub
 let pubsub;
@@ -142,9 +144,9 @@ const stats = {
   messageHistory: [] // Últimas 50 mensagens processadas
 };
 
-// Logs recentes (últimas 100 linhas)
+// Logs recentes (últimas 50 linhas — alinhado ao quadro do observatório)
 const recentLogs = [];
-const MAX_LOGS = 100;
+const MAX_LOGS = 50;
 
 /**
  * Adicionar log ao histórico
@@ -290,7 +292,7 @@ const processAudio = async (gcsUri, fileName) => {
         gptResult = null;
       }
     } else {
-      addLog('INFO', '⏭️  Análise GPT desabilitada (ENABLE_GPT_ANALYSIS=false)');
+      addLog('INFO', '⏭️  Análise GPT desabilitada (defina ENABLE_GPT_ANALYSIS=true para ativar)');
     }
     
     // 4. Cruzar outputs (Gemini + GPT se disponível)

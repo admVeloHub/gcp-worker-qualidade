@@ -1,4 +1,5 @@
-// VERSION: v1.0.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+// VERSION: v1.1.0 | DATE: 2026-03-20 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v1.1.0 - Logs recentes: 50 linhas, mais recentes primeiro; API alinha com buffer do worker
 // Observatório de monitoramento do worker
 
 const express = require('express');
@@ -275,7 +276,7 @@ router.get('/observatorio', (req, res) => {
         </div>
         
         <div class="section">
-            <h2>Logs Recentes (Últimas 100)</h2>
+            <h2>Logs Recentes (Últimas 50 — mais recentes no topo)</h2>
             <div id="logs">Carregando...</div>
         </div>
     </div>
@@ -385,9 +386,9 @@ router.get('/observatorio', (req, res) => {
                         document.getElementById('message-history').innerHTML = '<p>Nenhuma mensagem processada ainda</p>';
                     }
                     
-                    // Logs
+                    // Logs (mais recentes primeiro; API já entrega até 50 entradas)
                     if (data.logs && data.logs.length > 0) {
-                        const logsHtml = data.logs.map(log => \`
+                        const logsHtml = data.logs.slice().reverse().map(log => \`
                             <div class="log-entry \${log.level}">
                                 [\${new Date(log.timestamp).toLocaleString()}] [\${log.level}] \${log.message}
                             </div>
@@ -431,7 +432,7 @@ router.get('/observatorio/data', async (req, res) => {
     
     res.json({
       stats,
-      logs: logs.slice(-100) // Últimas 100 linhas
+      logs: logs.slice(-50) // Últimas 50 linhas (ordem cronológica; UI inverte para topo = mais recente)
     });
   } catch (error) {
     res.status(500).json({
