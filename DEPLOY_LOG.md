@@ -6,7 +6,7 @@
 **Tipo:** GitHub Push  
 **Repositório:** admVeloHub/gcp-worker-qualidade  
 **Branch:** main  
-**Commit:** PLACEHOLDER_COMMIT_HASH  
+**Commit:** 8ef634d  
 
 ### Descrição:
 Ajustes de comportamento e documentação do worker de processamento de áudio:
