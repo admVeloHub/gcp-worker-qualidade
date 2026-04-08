@@ -1,5 +1,24 @@
 # DEPLOY LOG - Worker de Qualidade de Áudio
 
+## GitHub Push — observatório UI (painel duplo, fila unificada, log path) — 2026-04-08
+
+**Data/Hora:** 2026-04-08  
+**Tipo:** GitHub Push  
+**Repositório:** admVeloHub/gcp-worker-qualidade  
+**Branch:** main  
+
+### Descrição:
+Melhorias no painel `/observatorio` e diagnóstico de arranque:
+
+**Arquivos modificados:**
+- `backend/worker/observatorio.js` — Dois subpainéis lado a lado (métricas e conexões), largura ao conteúdo, sem títulos internos; secção **Fila** única (processamento + itens em auto-retry com texto amarelo e sufixo `(MMm - n/3)`); removido bloco “Histórico de Mensagens”; cabeçalho HTML sem semver incremental (release worker v2.0.0 quando aprovado)
+- `backend/worker/audioProcessor.js` — Log ao carregar módulo com caminho absoluto de `./observatorio` (`require.resolve`) para evitar confusão entre cópias do projeto
+
+**Impacto:**
+- Observatório mais compacto e alinhado à política de retry; facilita confirmar qual ficheiro de dashboard está em uso ao subir o processo
+
+---
+
 ## GitHub Push — auto-retry áudio IA (pending/done/failed), sweep Pub/Sub, observatório — 2026-04-08
 
 **Data/Hora:** 2026-04-08  

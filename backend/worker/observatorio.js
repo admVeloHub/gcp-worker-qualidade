@@ -1,7 +1,5 @@
-// VERSION: v1.2.0 | DATE: 2026-04-08 | AUTHOR: VeloHub Development Team
-// CHANGELOG: v1.2.0 - Seção fila auto-retry (amarelo + timer); logs/histórico sem reverse (buffer já newest-first)
-// CHANGELOG: v1.1.0 - Logs recentes: 50 linhas, mais recentes primeiro; API alinha com buffer do worker
-// Observatório de monitoramento do worker
+// Observatório de monitoramento do worker — VeloHub Development Team
+// Política de versão: não incrementar semver neste arquivo a cada alteração. O release do worker será rotulado **v2.0.0** quando o conjunto estiver pronto (único bump nessa entrega).
 
 const express = require('express');
 const router = express.Router();
@@ -16,7 +14,7 @@ router.get('/observatorio', (req, res) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Observatório - Worker de Qualidade</title>
+    <title>Observatório — Worker de Qualidade</title>
     <style>
         * {
             margin: 0;
@@ -27,37 +25,116 @@ router.get('/observatorio', (req, res) => {
             font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
             background: #000000;
             color: #00ff00;
-            padding: 20px;
+            padding: 8px 20px 20px;
             min-height: 100vh;
         }
         .container {
             max-width: 1400px;
             margin: 0 auto;
         }
+        /* Título + faixa com dois painéis iguais (métricas | conexões) */
+        .page-header {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0;
+            margin: 0 0 28px 0;
+            padding: 0;
+            width: 100%;
+        }
+        .page-header h1 {
+            flex: 0 0 auto;
+        }
         h1 {
             color: #00ff00;
             text-align: center;
-            margin-bottom: 30px;
+            margin: 0;
+            padding: 0;
             font-size: 36px;
             font-weight: normal;
+            line-height: 1;
             text-transform: uppercase;
             letter-spacing: 4px;
             text-shadow: 0 0 10px #00ff00, 0 0 20px #00ff00;
         }
-        .status-bar {
+        .status-bar-wrap {
+            display: flex;
+            justify-content: center;
+            width: 100%;
+            margin: 0;
+            padding-top: 2px;
+            flex: 0 0 auto;
+        }
+        /* Duas caixas lado a lado, cada uma só com a largura do conteúdo */
+        .status-panels-row {
+            display: flex;
+            flex-direction: row;
+            align-items: stretch;
+            gap: 12px;
+            width: fit-content;
+            max-width: 100%;
+            margin: 0 auto;
+            box-sizing: border-box;
+        }
+        .status-subpanel {
+            flex: 0 1 auto;
+            width: max-content;
+            max-width: 100%;
             background: rgba(0, 255, 0, 0.1);
             border: 1px solid #00ff00;
             border-radius: 4px;
-            padding: 15px 20px;
-            margin-bottom: 30px;
+            padding: 10px 12px;
+            box-sizing: border-box;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.3);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        .status-bar {
             display: flex;
             align-items: center;
-            gap: 30px;
-            box-shadow: 0 0 20px rgba(0, 255, 0, 0.3);
+            gap: 16px;
+            justify-content: center;
+            flex-wrap: wrap;
+            width: max-content;
+            max-width: 100%;
+        }
+        .connections-block {
+            margin: 0;
+            padding: 0;
+            width: max-content;
+            max-width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .status-subpanel .connections-row {
+            justify-content: center;
+            margin: 0;
+            gap: 18px 24px;
+        }
+        @media (max-width: 720px) {
+            .status-panels-row {
+                flex-direction: column;
+                width: 100%;
+                max-width: 100%;
+            }
+            .status-subpanel {
+                width: 100%;
+                max-width: 100%;
+            }
+            .status-bar {
+                width: 100%;
+            }
+            .connections-block {
+                width: 100%;
+            }
         }
         .status-indicator {
-            width: 16px;
-            height: 16px;
+            width: 12px;
+            height: 12px;
+            flex-shrink: 0;
             border-radius: 50%;
             box-shadow: 0 0 10px currentColor, 0 0 20px currentColor;
             animation: pulse 2s infinite;
@@ -76,24 +153,26 @@ router.get('/observatorio', (req, res) => {
         }
         .status-data {
             display: flex;
-            gap: 30px;
+            gap: 18px;
             align-items: center;
             flex-wrap: wrap;
-            flex: 1;
+            flex: 0 1 auto;
+            justify-content: center;
         }
         .data-item {
             display: flex;
             flex-direction: column;
-            gap: 4px;
+            gap: 1px;
         }
         .data-label {
-            font-size: 10px;
+            font-size: 9px;
             color: #00ff88;
             text-transform: uppercase;
             letter-spacing: 1px;
         }
         .data-value {
-            font-size: 18px;
+            font-size: 15px;
+            line-height: 1.15;
             color: #00ff00;
             font-weight: bold;
             text-shadow: 0 0 5px #00ff00;
@@ -226,8 +305,66 @@ router.get('/observatorio', (req, res) => {
             border-left-color: #888888;
             color: #888888;
         }
-        .queue-retry, .queue-retry td {
-            color: #ffcc00 !important;
+        .queue-unified {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .queue-unified-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 8px 14px;
+            padding: 10px 12px;
+            border-left: 3px solid #00ff00;
+            background: rgba(0, 255, 0, 0.05);
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+        }
+        .queue-unified-row--retry {
+            color: #ffcc00;
+            border-left-color: #ffcc00;
+            background: rgba(255, 204, 0, 0.07);
+        }
+        .queue-unified-row--retry .queue-file,
+        .queue-unified-row--retry .queue-meta {
+            color: #ffcc00;
+        }
+        .queue-file {
+            color: #00ff00;
+            font-weight: bold;
+            word-break: break-all;
+            flex: 1 1 200px;
+        }
+        .queue-meta {
+            color: #00ff88;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+        .connections-row {
+            display: flex;
+            flex-direction: row;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: center;
+            gap: 28px 36px;
+            min-height: 1.2em;
+        }
+        .conn-item {
+            display: inline-flex;
+            flex-direction: row;
+            align-items: center;
+            gap: 10px;
+            flex: 0 0 auto;
+        }
+        .conn-label {
+            font-size: 11px;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #00ff88;
+            white-space: nowrap;
         }
         @keyframes pulse {
             0%, 100% { opacity: 1; }
@@ -237,8 +374,11 @@ router.get('/observatorio', (req, res) => {
 </head>
 <body>
     <div class="container">
+        <header class="page-header">
         <h1>Observatório</h1>
-        
+        <div class="status-bar-wrap">
+        <div class="status-panels-row">
+        <div class="status-subpanel">
         <div class="status-bar" id="status-bar">
             <div class="status-indicator" id="status-indicator"></div>
             <div class="status-data">
@@ -260,28 +400,35 @@ router.get('/observatorio', (req, res) => {
                 </div>
             </div>
         </div>
+        </div>
+        <div class="status-subpanel">
+        <div class="connections-block">
+            <div class="connections-row" role="list">
+                <div class="conn-item" role="listitem">
+                    <div class="status-indicator error" id="conn-led-mongodb" title="…" aria-label="MongoDB"></div>
+                    <span class="conn-label">MongoDB</span>
+                </div>
+                <div class="conn-item" role="listitem">
+                    <div class="status-indicator error" id="conn-led-pubsub" title="…" aria-label="Pub/Sub"></div>
+                    <span class="conn-label">Pub/Sub</span>
+                </div>
+                <div class="conn-item" role="listitem">
+                    <div class="status-indicator error" id="conn-led-vertex" title="…" aria-label="Vertex AI"></div>
+                    <span class="conn-label">Vertex AI</span>
+                </div>
+            </div>
+        </div>
+        </div>
+        </div>
+        </div>
+        </header>
         
         <div class="dashboard" id="dashboard" style="display: none;">
         </div>
         
         <div class="section">
-            <h2>Status de Conexões</h2>
-            <div id="connections-status">Carregando...</div>
-        </div>
-        
-        <div class="section">
-            <h2>Mensagens em Processamento</h2>
-            <div id="processing-messages">Nenhuma mensagem em processamento</div>
-        </div>
-        
-        <div class="section">
-            <h2>Fila auto-retry (mais recentes no topo)</h2>
-            <div id="auto-retry-queue"><p>Nenhum item na fila de reconciliação</p></div>
-        </div>
-        
-        <div class="section">
-            <h2>Histórico de Mensagens (Últimas 50)</h2>
-            <div id="message-history">Carregando...</div>
+            <h2>Fila</h2>
+            <div id="unified-process-queue"><p>Nenhum item na fila</p></div>
         </div>
         
         <div class="section">
@@ -291,6 +438,43 @@ router.get('/observatorio', (req, res) => {
     </div>
     
     <script>
+        function mapConnStatusToIndicator(status) {
+            if (status === 'healthy') return 'healthy';
+            if (status === 'partial') return 'degraded';
+            return 'error';
+        }
+        
+        function applyConnLed(elId, componentStatus, labelPrefix) {
+            const el = document.getElementById(elId);
+            if (!el) return;
+            const led = mapConnStatusToIndicator(componentStatus);
+            el.className = 'status-indicator ' + led;
+            el.title = String(componentStatus);
+            el.setAttribute('aria-label', labelPrefix + ': ' + String(componentStatus));
+        }
+        
+        function escapeHtml(s) {
+            if (s == null || s === '') return '';
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+        
+        /** Fila auto-retry agendada: (MMm - n/3) alinhado ao sweep (MAX 3 tentativas). */
+        function formatRetryParen(q) {
+            if (!q || q.mode !== 'scheduled' || q.nextInMs == null) return '';
+            var max = 3;
+            var attemptIdx = typeof q.attempt === 'number' ? q.attempt : 0;
+            var n = attemptIdx + 1;
+            if (n < 1) n = 1;
+            if (n > max) n = max;
+            var minutes = Math.max(0, Math.ceil(Number(q.nextInMs) / 60000));
+            var mm = minutes < 10 ? ('0' + minutes) : String(minutes);
+            return '(' + mm + 'm - ' + n + '/' + max + ')';
+        }
+        
         async function loadData() {
             try {
                 // Carregar health check
@@ -306,119 +490,58 @@ router.get('/observatorio', (req, res) => {
                 document.getElementById('processing').textContent = health.statistics.currentlyProcessing;
                 document.getElementById('uptime').textContent = health.uptime.formatted;
                 
-                // Status de conexões
-                const connectionsHtml = \`
-                    <table>
-                        <tr>
-                            <th>Componente</th>
-                            <th>Status</th>
-                            <th>Detalhes</th>
-                        </tr>
-                        <tr>
-                            <td>MongoDB</td>
-                            <td><span class="status-badge status-\${health.components.mongodb.status}">\${health.components.mongodb.status}</span></td>
-                            <td>\${health.components.mongodb.statusConnection ? health.components.mongodb.statusConnection.name : 'N/A'}</td>
-                        </tr>
-                        <tr>
-                            <td>Pub/Sub</td>
-                            <td><span class="status-badge status-\${health.components.pubsub.status}">\${health.components.pubsub.status}</span></td>
-                            <td>\${health.components.pubsub.subscriptionName || 'N/A'}</td>
-                        </tr>
-                        <tr>
-                            <td>Vertex AI</td>
-                            <td><span class="status-badge status-\${health.components.vertexAI.status}">\${health.components.vertexAI.status}</span></td>
-                            <td>Speech: \${health.components.vertexAI.speechClient}, Gemini: \${health.components.vertexAI.geminiAI}</td>
-                        </tr>
-                    </table>
-                \`;
-                document.getElementById('connections-status').innerHTML = connectionsHtml;
-                
-                // Mensagens em processamento
-                let processingHtml = '<p>Nenhuma mensagem em processamento</p>';
-                if (health.statistics.currentlyProcessing > 0) {
-                    try {
-                        const dataRes = await fetch('/observatorio/data');
-                        const data = await dataRes.json();
-                        if (data.stats && data.stats.processingMessages && data.stats.processingMessages.length > 0) {
-                            processingHtml = \`
-                                <table>
-                                    <tr>
-                                        <th>Message ID</th>
-                                        <th>Arquivo</th>
-                                        <th>Tempo em Processamento</th>
-                                    </tr>
-                                    \${data.stats.processingMessages.map(([msgId, info]) => \`
-                                        <tr>
-                                            <td>\${msgId.substring(0, 20)}...</td>
-                                            <td>\${info.fileName}</td>
-                                            <td>\${((Date.now() - info.startTime) / 1000).toFixed(2)}s</td>
-                                        </tr>
-                                    \`).join('')}
-                                </table>
-                            \`;
-                        } else {
-                            processingHtml = '<p>Processando ' + health.statistics.currentlyProcessing + ' mensagem(ns)</p>';
-                        }
-                    } catch (error) {
-                        processingHtml = '<p>Processando ' + health.statistics.currentlyProcessing + ' mensagem(ns)</p>';
-                    }
+                // Status de conexões — LEDs fixos na 2ª linha do painel (atualiza classes, sem innerHTML)
+                if (health.components) {
+                    applyConnLed('conn-led-mongodb', health.components.mongodb.status, 'MongoDB');
+                    applyConnLed('conn-led-pubsub', health.components.pubsub.status, 'Pub/Sub');
+                    applyConnLed('conn-led-vertex', health.components.vertexAI.status, 'Vertex AI');
                 }
-                document.getElementById('processing-messages').innerHTML = processingHtml;
                 
-                // Carregar histórico, fila retry e logs
+                let data = { stats: {}, logs: [] };
                 try {
                     const dataRes = await fetch('/observatorio/data');
-                    const data = await dataRes.json();
-                    
-                    const queue = (data.stats && data.stats.autoRetryQueue) ? data.stats.autoRetryQueue : [];
-                    if (queue.length > 0) {
-                        const qHtml = \`
-                            <table class="queue-retry">
-                                <tr>
-                                    <th>Quando</th>
-                                    <th>Arquivo</th>
-                                    <th>Modo</th>
-                                    <th>Detalhe</th>
-                                </tr>
-                                \${queue.map(q => \`
-                                    <tr>
-                                        <td>\${q.ts ? new Date(q.ts).toLocaleString() : '-'}</td>
-                                        <td>\${q.fileName || '-'}</td>
-                                        <td>\${q.mode || '-'}</td>
-                                        <td>\${q.label || (q.attempt != null ? 'tentativa ' + q.attempt : '') || '-'}</td>
-                                    </tr>
-                                \`).join('')}
-                            </table>
-                        \`;
-                        document.getElementById('auto-retry-queue').innerHTML = qHtml;
-                    } else {
-                        document.getElementById('auto-retry-queue').innerHTML = '<p>Nenhum item na fila de reconciliação</p>';
-                    }
-                    
-                    if (data.stats && data.stats.messageHistory && data.stats.messageHistory.length > 0) {
-                        const historyHtml = \`
-                            <table>
-                                <tr>
-                                    <th>Timestamp</th>
-                                    <th>Arquivo</th>
-                                    <th>Status</th>
-                                    <th>Tempo (s)</th>
-                                </tr>
-                                \${data.stats.messageHistory.map(msg => \`
-                                    <tr>
-                                        <td>\${new Date(msg.timestamp).toLocaleString()}</td>
-                                        <td>\${msg.fileName}</td>
-                                        <td><span class="status-badge status-\${msg.status === 'success' ? 'success' : 'failed'}">\${msg.status === 'success' ? 'OK' : 'ERR'}</span></td>
-                                        <td>\${msg.processingTime ? msg.processingTime.toFixed(2) : 'N/A'}</td>
-                                    </tr>
-                                \`).join('')}
-                            </table>
-                        \`;
-                        document.getElementById('message-history').innerHTML = historyHtml;
-                    } else {
-                        document.getElementById('message-history').innerHTML = '<p>Nenhuma mensagem processada ainda</p>';
-                    }
-                    
+                    data = await dataRes.json();
+                } catch (error) {
+                    console.error('Erro ao carregar dados:', error);
+                    document.getElementById('unified-process-queue').innerHTML = '<p>Erro ao carregar fila</p>';
+                    document.getElementById('logs').innerHTML = '<p>Erro ao carregar logs</p>';
+                    return;
+                }
+                
+                var proc = (data.stats && data.stats.processingMessages) ? data.stats.processingMessages : [];
+                var autoQ = (data.stats && data.stats.autoRetryQueue) ? data.stats.autoRetryQueue : [];
+                var processingFiles = new Set();
+                proc.forEach(function (pair) {
+                    if (pair[1] && pair[1].fileName) processingFiles.add(pair[1].fileName);
+                });
+                var scheduled = autoQ.filter(function (q) {
+                    return q.mode === 'scheduled' && q.fileName && processingFiles.has(q.fileName) === false;
+                });
+                var uhtml = '';
+                if (proc.length === 0 && scheduled.length === 0) {
+                    uhtml = '<p>Nenhum item na fila</p>';
+                } else {
+                    var rows = [];
+                    proc.forEach(function (pair) {
+                        var msgId = pair[0];
+                        var info = pair[1] || {};
+                        var fid = escapeHtml(info.fileName || '—');
+                        var midRaw = String(msgId || '');
+                        var mid = escapeHtml(midRaw.length > 28 ? midRaw.substring(0, 28) + '…' : midRaw);
+                        var st = info.startTime != null ? info.startTime : Date.now();
+                        var sec = ((Date.now() - st) / 1000).toFixed(1);
+                        rows.push('<div class="queue-unified-row"><span class="queue-file">' + fid + '</span><span class="queue-meta">' + mid + ' · ' + sec + 's</span></div>');
+                    });
+                    scheduled.forEach(function (q) {
+                        var fid = escapeHtml(q.fileName || '—');
+                        var suffix = formatRetryParen(q);
+                        rows.push('<div class="queue-unified-row queue-unified-row--retry"><span class="queue-file">' + fid + '</span><span class="queue-meta">' + suffix + '</span></div>');
+                    });
+                    uhtml = '<div class="queue-unified">' + rows.join('') + '</div>';
+                }
+                document.getElementById('unified-process-queue').innerHTML = uhtml;
+                
+                try {
                     if (data.logs && data.logs.length > 0) {
                         const logsHtml = data.logs.map(log => \`
                             <div class="log-entry \${log.level}">
@@ -430,10 +553,8 @@ router.get('/observatorio', (req, res) => {
                         document.getElementById('logs').innerHTML = '<p>Nenhum log disponível</p>';
                     }
                 } catch (error) {
-                    console.error('Erro ao carregar dados:', error);
-                    document.getElementById('message-history').innerHTML = '<p>Erro ao carregar histórico</p>';
+                    console.error('Erro ao renderizar logs:', error);
                     document.getElementById('logs').innerHTML = '<p>Erro ao carregar logs</p>';
-                    document.getElementById('auto-retry-queue').innerHTML = '<p>Erro ao carregar fila</p>';
                 }
                 
             } catch (error) {
@@ -450,7 +571,13 @@ router.get('/observatorio', (req, res) => {
 </body>
 </html>
   `;
-  
+
+  res.set({
+    'Cache-Control': 'no-store, no-cache, must-revalidate, private',
+    Pragma: 'no-cache',
+    Expires: '0'
+  });
+  res.type('html');
   res.send(html);
 });
 

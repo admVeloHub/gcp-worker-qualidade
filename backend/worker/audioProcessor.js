@@ -91,6 +91,7 @@ function loadWorkerModules() {
     healthCheckRouter = require('./healthCheck');
     observatorioRouter = require('./observatorio');
     registerWorkerInstances = healthCheckRouter.registerWorkerInstances;
+    console.log(`[${new Date().toISOString()}] [INFO] 📋 Observatório HTML carregado de: ${require.resolve('./observatorio')}`);
     
     console.log(`[${new Date().toISOString()}] [INFO] ✅ Módulos do worker carregados com sucesso`);
     
