@@ -1,4 +1,5 @@
-// VERSION: v3.6.0 | DATE: 2026-03-20 | AUTHOR: VeloHub Development Team
+// VERSION: v3.7.0 | DATE: 2026-04-08 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v3.7.0 - audioTreated pending|done|failed; auto-retry sweep; autoRetryQueue; logs/histórico unshift
 // CHANGELOG: v3.6.0 - Buffer de logs do observatório: 50 linhas; GPT só com ENABLE_GPT_ANALYSIS=true (default off)
 // CHANGELOG: v3.5.1 - Correção erro de sintaxe: removido } extra e corrigida indentação no cálculo de pontuação consensual
 // Worker assíncrono para processamento de áudio via Pub/Sub
@@ -119,6 +120,7 @@ const PUBSUB_SUBSCRIPTION_NAME = process.env.PUBSUB_SUBSCRIPTION_NAME || 'upload
 const PUBSUB_TOPIC_NAME = process.env.PUBSUB_TOPIC_NAME || 'qualidade_audio_envio';
 const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3', 10);
 const BACKEND_API_URL = process.env.BACKEND_API_URL || 'http://localhost:3001';
+const startAutoRetrySweep = require('./audioAutoRetrySweep').startAutoRetrySweep;
 // Só envia para GPT/OpenAI quando ENABLE_GPT_ANALYSIS=true explicitamente (default: não enviar)
 const ENABLE_GPT_ANALYSIS = process.env.ENABLE_GPT_ANALYSIS === 'true';
 
@@ -141,27 +143,46 @@ const stats = {
   totalFailed: 0,
   lastMessageTime: null,
   processingMessages: new Map(), // messageId -> { fileName, startTime }
-  messageHistory: [] // Últimas 50 mensagens processadas
+  messageHistory: [],
+  autoRetryQueue: []
 };
 
-// Logs recentes (últimas 50 linhas — alinhado ao quadro do observatório)
 const recentLogs = [];
 const MAX_LOGS = 50;
+let sweepStarted = false;
+let mongoSucceeded = false;
 
-/**
- * Adicionar log ao histórico
- */
+const pushAutoRetryQueue = (entry) => {
+  const id = entry.avaliacaoId;
+  if (id) {
+    const idx = stats.autoRetryQueue.findIndex((x) => x.avaliacaoId === id);
+    if (idx >= 0) stats.autoRetryQueue.splice(idx, 1);
+  }
+  stats.autoRetryQueue.unshift(entry);
+  if (stats.autoRetryQueue.length > 50) stats.autoRetryQueue.pop();
+};
+
+const tryStartAutoRetrySweep = () => {
+  if (sweepStarted || !mongoSucceeded || !pubsub) return;
+  sweepStarted = true;
+  startAutoRetrySweep({
+    addLog,
+    recordQueue: pushAutoRetryQueue,
+    getPubSub: () => pubsub,
+    bucketName: GCS_BUCKET_NAME
+  });
+};
+
 const addLog = (level, message) => {
   const logEntry = {
     timestamp: new Date().toISOString(),
     level,
     message
   };
-  recentLogs.push(logEntry);
+  recentLogs.unshift(logEntry);
   if (recentLogs.length > MAX_LOGS) {
-    recentLogs.shift();
+    recentLogs.pop();
   }
-  // Também logar no console
   console.log(`[${logEntry.timestamp}] [${level}] ${message}`);
 };
 
@@ -377,7 +398,7 @@ const processMessage = async (message) => {
       const processingInfo = stats.processingMessages.get(messageId);
       const processingTime = processingInfo ? (Date.now() - processingInfo.startTime) / 1000 : 0;
       
-      stats.messageHistory.push({
+      stats.messageHistory.unshift({
         messageId,
         fileName,
         status: 'failed',
@@ -385,24 +406,18 @@ const processMessage = async (message) => {
         processingTime,
         timestamp: new Date().toISOString()
       });
+      if (stats.messageHistory.length > 50) stats.messageHistory.pop();
       
-      // Manter apenas últimas 50 mensagens
-      if (stats.messageHistory.length > 50) {
-        stats.messageHistory.shift();
-      }
-      
-      // Limpar contador de retries e mensagem em processamento
       messageRetries.delete(messageId);
       stats.processingMessages.delete(messageId);
       
-      // Fazer ack() imediatamente (erro não recuperável)
       message.ack();
       addLog('INFO', `✅ Mensagem removida da fila (erro não recuperável) [ID: ${messageId}]`);
       return;
     }
     
     // 3. Verificar se avaliação já foi processada
-    if (avaliacao.audioTreated) {
+    if (avaliacao.audioTreated === 'done' || avaliacao.audioTreated === true) {
       addLog('INFO', `ℹ️  Arquivo ${fileName} já foi processado para avaliação ${avaliacao._id}. Ignorando.`);
       // Limpar contador de retries e mensagem em processamento
       messageRetries.delete(messageId);
@@ -504,11 +519,10 @@ const processMessage = async (message) => {
     await audioResult.save();
     addLog('INFO', `✅ Resultado salvo no MongoDB: ${audioResult._id}`);
 
-    // Atualizar audioTreated diretamente na avaliação
-    avaliacao.audioTreated = true;
+    avaliacao.audioTreated = 'done';
     avaliacao.audioUpdatedAt = new Date();
     await avaliacao.save();
-    addLog('INFO', `✅ Status atualizado: audioTreated=true para avaliacaoId: ${avaliacao._id}`);
+    addLog('INFO', `✅ Status atualizado: audioTreated=done para avaliacaoId: ${avaliacao._id}`);
 
     // Notificar backend API sobre conclusão (dispara evento SSE)
     await notifyBackendCompletion(avaliacao._id.toString());
@@ -522,25 +536,21 @@ const processMessage = async (message) => {
     const processingInfo = stats.processingMessages.get(messageId);
     const processingTime = processingInfo ? (Date.now() - processingInfo.startTime) / 1000 : 0;
     
-    stats.messageHistory.push({
-      messageId,
-      fileName,
-      status: 'success',
-      processingTime,
-      timestamp: new Date().toISOString()
-    });
-    
-    // Manter apenas últimas 50 mensagens
-    if (stats.messageHistory.length > 50) {
-      stats.messageHistory.shift();
-    }
+      stats.messageHistory.unshift({
+        messageId,
+        fileName,
+        status: 'success',
+        processingTime,
+        timestamp: new Date().toISOString()
+      });
+      if (stats.messageHistory.length > 50) stats.messageHistory.pop();
 
-    // Limpar contador de retries e mensagem em processamento
-    messageRetries.delete(messageId);
-    stats.processingMessages.delete(messageId);
+      // Limpar contador de retries e mensagem em processamento
+      messageRetries.delete(messageId);
+      stats.processingMessages.delete(messageId);
 
-    // Confirmar mensagem processada
-    message.ack();
+      // Confirmar mensagem processada
+      message.ack();
     addLog('INFO', `✅ Mensagem processada e confirmada [ID: ${messageId}]`);
     
   } catch (error) {
@@ -561,7 +571,7 @@ const processMessage = async (message) => {
       const processingInfo = stats.processingMessages.get(messageId);
       const processingTime = processingInfo ? (Date.now() - processingInfo.startTime) / 1000 : 0;
       
-      stats.messageHistory.push({
+      stats.messageHistory.unshift({
         messageId,
         fileName: processingInfo?.fileName || 'unknown',
         status: 'failed',
@@ -569,11 +579,7 @@ const processMessage = async (message) => {
         processingTime,
         timestamp: new Date().toISOString()
       });
-      
-      // Manter apenas últimas 50 mensagens
-      if (stats.messageHistory.length > 50) {
-        stats.messageHistory.shift();
-      }
+      if (stats.messageHistory.length > 50) stats.messageHistory.pop();
       
       // Limpar contador de retries e mensagem em processamento
       messageRetries.delete(messageId);
@@ -601,7 +607,7 @@ const processMessage = async (message) => {
       const processingInfo = stats.processingMessages.get(messageId);
       const processingTime = processingInfo ? (Date.now() - processingInfo.startTime) / 1000 : 0;
       
-      stats.messageHistory.push({
+      stats.messageHistory.unshift({
         messageId,
         fileName: processingInfo?.fileName || 'unknown',
         status: 'failed',
@@ -609,11 +615,7 @@ const processMessage = async (message) => {
         processingTime,
         timestamp: new Date().toISOString()
       });
-      
-      // Manter apenas últimas 50 mensagens
-      if (stats.messageHistory.length > 50) {
-        stats.messageHistory.shift();
-      }
+      if (stats.messageHistory.length > 50) stats.messageHistory.pop();
       
       // Marcar como erro na avaliação se existir
       if (avaliacao) {
@@ -647,6 +649,8 @@ const initializeMongoDB = async () => {
     await AudioAnaliseResult.initializeConnection();
     await QualidadeAvaliacao.initializeConnection();
     addLog('INFO', '✅ MongoDB inicializado com sucesso');
+    mongoSucceeded = true;
+    tryStartAutoRetrySweep();
     return true;
   } catch (error) {
     addLog('ERROR', `❌ Erro ao inicializar MongoDB: ${error.message}`);
@@ -716,6 +720,7 @@ const startWorker = async () => {
     try {
       initializePubSub();
       addLog('INFO', '✅ Pub/Sub inicializado');
+      tryStartAutoRetrySweep();
       
       subscription.on('message', processMessage);
       subscription.on('error', (error) => {
@@ -789,7 +794,11 @@ module.exports = {
   processAudio,
   initializePubSub,
   initializeMongoDB,
-  getStats: () => ({ ...stats, processingMessages: Array.from(stats.processingMessages.entries()) }),
+  getStats: () => ({
+    ...stats,
+    processingMessages: Array.from(stats.processingMessages.entries()),
+    autoRetryQueue: stats.autoRetryQueue || []
+  }),
   getLogs: () => recentLogs
 };
 

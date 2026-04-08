@@ -1,5 +1,26 @@
 # DEPLOY LOG - Worker de Qualidade de Áudio
 
+## GitHub Push — auto-retry áudio IA (pending/done/failed), sweep Pub/Sub, observatório — 2026-04-08
+
+**Data/Hora:** 2026-04-08  
+**Tipo:** GitHub Push  
+**Repositório:** admVeloHub/gcp-worker-qualidade  
+**Branch:** main  
+
+### Descrição:
+Pipeline de tratamento de áudio com estados explícitos, retry autónomo sem browser e painel de fila:
+
+**Arquivos modificados ou adicionados:**
+- `backend/models/QualidadeAvaliacao.js` (v1.2.0) — `audioTreated` como Mixed (strings `pending`|`done`|`failed` e legado boolean); `audioAutoRepublishAttempts`, `audioLastAutoRepublishAt`, `audioManualReenvioDisponivelEm`
+- `backend/worker/audioAutoRetrySweep.js` (v1.0.0) — sweep ~60s; republicação Pub/Sub; após 3 tentativas com tick seguinte ainda pendente → `failed` e desbloqueio manual (+15 min)
+- `backend/worker/audioProcessor.js` (v3.7.0) — sucesso → `audioTreated: 'done'`; integração com fila de auto-retry; logs/histórico com unbuffer newest-first
+- `backend/worker/observatorio.js` (v1.2.0) — secção fila auto-retry (amarelo + timer); alinhamento de exibição de logs/histórico
+
+**Impacto:**
+- Worker pode recuperar mensagens pendentes sem reenvio manual até política de retries; falhas transitórias documentadas no observatório; compatível com documentos legado `audioTreated: false` onde aplicável
+
+---
+
 ## GitHub Push - GPT opcional, buffer de logs 50 linhas, observatório - 2026-03-23
 
 **Data/Hora:** 2026-03-23  

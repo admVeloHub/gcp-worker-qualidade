@@ -1,4 +1,5 @@
-// VERSION: v1.1.0 | DATE: 2026-03-20 | AUTHOR: VeloHub Development Team
+// VERSION: v1.2.0 | DATE: 2026-04-08 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v1.2.0 - Seção fila auto-retry (amarelo + timer); logs/histórico sem reverse (buffer já newest-first)
 // CHANGELOG: v1.1.0 - Logs recentes: 50 linhas, mais recentes primeiro; API alinha com buffer do worker
 // Observatório de monitoramento do worker
 
@@ -225,6 +226,9 @@ router.get('/observatorio', (req, res) => {
             border-left-color: #888888;
             color: #888888;
         }
+        .queue-retry, .queue-retry td {
+            color: #ffcc00 !important;
+        }
         @keyframes pulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.4; }
@@ -268,6 +272,11 @@ router.get('/observatorio', (req, res) => {
         <div class="section">
             <h2>Mensagens em Processamento</h2>
             <div id="processing-messages">Nenhuma mensagem em processamento</div>
+        </div>
+        
+        <div class="section">
+            <h2>Fila auto-retry (mais recentes no topo)</h2>
+            <div id="auto-retry-queue"><p>Nenhum item na fila de reconciliação</p></div>
         </div>
         
         <div class="section">
@@ -356,12 +365,36 @@ router.get('/observatorio', (req, res) => {
                 }
                 document.getElementById('processing-messages').innerHTML = processingHtml;
                 
-                // Carregar histórico e logs
+                // Carregar histórico, fila retry e logs
                 try {
                     const dataRes = await fetch('/observatorio/data');
                     const data = await dataRes.json();
                     
-                    // Histórico de mensagens
+                    const queue = (data.stats && data.stats.autoRetryQueue) ? data.stats.autoRetryQueue : [];
+                    if (queue.length > 0) {
+                        const qHtml = \`
+                            <table class="queue-retry">
+                                <tr>
+                                    <th>Quando</th>
+                                    <th>Arquivo</th>
+                                    <th>Modo</th>
+                                    <th>Detalhe</th>
+                                </tr>
+                                \${queue.map(q => \`
+                                    <tr>
+                                        <td>\${q.ts ? new Date(q.ts).toLocaleString() : '-'}</td>
+                                        <td>\${q.fileName || '-'}</td>
+                                        <td>\${q.mode || '-'}</td>
+                                        <td>\${q.label || (q.attempt != null ? 'tentativa ' + q.attempt : '') || '-'}</td>
+                                    </tr>
+                                \`).join('')}
+                            </table>
+                        \`;
+                        document.getElementById('auto-retry-queue').innerHTML = qHtml;
+                    } else {
+                        document.getElementById('auto-retry-queue').innerHTML = '<p>Nenhum item na fila de reconciliação</p>';
+                    }
+                    
                     if (data.stats && data.stats.messageHistory && data.stats.messageHistory.length > 0) {
                         const historyHtml = \`
                             <table>
@@ -371,7 +404,7 @@ router.get('/observatorio', (req, res) => {
                                     <th>Status</th>
                                     <th>Tempo (s)</th>
                                 </tr>
-                                \${data.stats.messageHistory.slice().reverse().map(msg => \`
+                                \${data.stats.messageHistory.map(msg => \`
                                     <tr>
                                         <td>\${new Date(msg.timestamp).toLocaleString()}</td>
                                         <td>\${msg.fileName}</td>
@@ -386,9 +419,8 @@ router.get('/observatorio', (req, res) => {
                         document.getElementById('message-history').innerHTML = '<p>Nenhuma mensagem processada ainda</p>';
                     }
                     
-                    // Logs (mais recentes primeiro; API já entrega até 50 entradas)
                     if (data.logs && data.logs.length > 0) {
-                        const logsHtml = data.logs.slice().reverse().map(log => \`
+                        const logsHtml = data.logs.map(log => \`
                             <div class="log-entry \${log.level}">
                                 [\${new Date(log.timestamp).toLocaleString()}] [\${log.level}] \${log.message}
                             </div>
@@ -401,6 +433,7 @@ router.get('/observatorio', (req, res) => {
                     console.error('Erro ao carregar dados:', error);
                     document.getElementById('message-history').innerHTML = '<p>Erro ao carregar histórico</p>';
                     document.getElementById('logs').innerHTML = '<p>Erro ao carregar logs</p>';
+                    document.getElementById('auto-retry-queue').innerHTML = '<p>Erro ao carregar fila</p>';
                 }
                 
             } catch (error) {
@@ -432,7 +465,7 @@ router.get('/observatorio/data', async (req, res) => {
     
     res.json({
       stats,
-      logs: logs.slice(-50) // Últimas 50 linhas (ordem cronológica; UI inverte para topo = mais recente)
+      logs: logs.slice(0, 50)
     });
   } catch (error) {
     res.status(500).json({

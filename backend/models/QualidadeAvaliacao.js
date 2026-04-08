@@ -1,4 +1,5 @@
-// VERSION: v1.1.0 | DATE: 2025-02-11 | AUTHOR: VeloHub Development Team
+// VERSION: v1.2.0 | DATE: 2026-04-08 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v1.2.0 - audioTreated Mixed (pending|done|failed; legado boolean); auto-retry + unlock manual
 // CHANGELOG: v1.1.0 - Substituído dominioAssunto por registroAtendimento, adicionado conformidadeTicket -15pts
 const mongoose = require('mongoose');
 const { getSecret } = require('../config/secrets');
@@ -166,8 +167,20 @@ const qualidadeAvaliacaoSchema = new mongoose.Schema({
     default: false
   },
   audioTreated: {
-    type: Boolean,
-    default: false
+    type: mongoose.Schema.Types.Mixed,
+    default: undefined
+  },
+  audioAutoRepublishAttempts: {
+    type: Number,
+    default: 0
+  },
+  audioLastAutoRepublishAt: {
+    type: Date,
+    default: null
+  },
+  audioManualReenvioDisponivelEm: {
+    type: Date,
+    default: null
   },
   audioCreatedAt: {
     type: Date,
