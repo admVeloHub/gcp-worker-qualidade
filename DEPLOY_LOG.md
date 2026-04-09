@@ -1,5 +1,25 @@
 # DEPLOY LOG - Worker de Qualidade de Áudio
 
+## GitHub Push — fila observatório alinhada ao done, retries TLS, BACKEND_API_URL Skynet — 2026-04-09
+
+**Data/Hora:** 2026-04-09  
+**Tipo:** GitHub Push  
+**Repositório:** admVeloHub/gcp-worker-qualidade  
+**Branch:** main  
+
+### Descrição:
+Correção da fila do observatório (entradas `scheduled` fantasma após `audioTreated: done`); classificação ampliada de erros recuperáveis (TLS/gRPC) para `nack`; documentação de `BACKEND_API_URL` como base URL do Skynet sem `/api`.
+
+**Arquivos modificados:**
+- `backend/worker/audioProcessor.js` (v3.7.1) — `removeAutoRetryQueueForAvaliacao` após sucesso; `isRecoverableError` com padrões ssl/tls/deadline/etc.; comentário da origem Skynet para notificações
+- `env.example` (v1.2.1) — `BACKEND_API_URL` documentada; exemplo Cloud Run do backend Skynet
+- `backend/worker/observatorio.js` — título da secção de logs alterado para «Log de Atividades»
+
+**Impacto:**
+- Painel «Fila» coerente com Mongo/portal após processamento; menos dependência só do sweep para falhas transitórias de API Google; deploy Cloud Run deve definir `BACKEND_API_URL` para o host Skynet
+
+---
+
 ## GitHub Push — observatório UI (painel duplo, fila unificada, log path) — 2026-04-08
 
 **Data/Hora:** 2026-04-08  

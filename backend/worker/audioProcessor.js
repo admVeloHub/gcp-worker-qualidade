@@ -1,4 +1,5 @@
-// VERSION: v3.7.0 | DATE: 2026-04-08 | AUTHOR: VeloHub Development Team
+// VERSION: v3.7.1 | DATE: 2026-04-09 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v3.7.1 - Sucesso: remove entrada da autoRetryQueue; TLS/gRPC recuperável; comentário BACKEND_API_URL = base Skynet sem /api
 // CHANGELOG: v3.7.0 - audioTreated pending|done|failed; auto-retry sweep; autoRetryQueue; logs/histórico unshift
 // CHANGELOG: v3.6.0 - Buffer de logs do observatório: 50 linhas; GPT só com ENABLE_GPT_ANALYSIS=true (default off)
 // CHANGELOG: v3.5.1 - Correção erro de sintaxe: removido } extra e corrigida indentação no cálculo de pontuação consensual
@@ -120,6 +121,7 @@ const GCS_BUCKET_NAME = process.env.GCS_BUCKET_NAME || 'qualidade_audio_envio';
 const PUBSUB_SUBSCRIPTION_NAME = process.env.PUBSUB_SUBSCRIPTION_NAME || 'upload_audio_qualidade';
 const PUBSUB_TOPIC_NAME = process.env.PUBSUB_TOPIC_NAME || 'qualidade_audio_envio';
 const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3', 10);
+/** Origem do Skynet (sem /api). Cloud Run: definir BACKEND_API_URL nas variáveis do serviço worker. */
 const BACKEND_API_URL = process.env.BACKEND_API_URL || 'http://localhost:3001';
 const startAutoRetrySweep = require('./audioAutoRetrySweep').startAutoRetrySweep;
 // Só envia para GPT/OpenAI quando ENABLE_GPT_ANALYSIS=true explicitamente (default: não enviar)
@@ -187,6 +189,17 @@ const addLog = (level, message) => {
   console.log(`[${logEntry.timestamp}] [${level}] ${message}`);
 };
 
+/** Sweep grava mode=scheduled no tick; ao concluir Pub/Sub com sucesso o doc some da query mas a entrada em memória permanecia — limpa aqui. */
+const removeAutoRetryQueueForAvaliacao = (avaliacao) => {
+  if (!stats.autoRetryQueue.length || !avaliacao || avaliacao._id == null) return;
+  const id = String(avaliacao._id);
+  const before = stats.autoRetryQueue.length;
+  stats.autoRetryQueue = stats.autoRetryQueue.filter((x) => x.avaliacaoId !== id);
+  if (stats.autoRetryQueue.length !== before) {
+    addLog('DEBUG', `🧹 Fila observatório: removido avaliacaoId=${id}`);
+  }
+};
+
 /**
  * Inicializar cliente Pub/Sub
  */
@@ -231,13 +244,25 @@ const isRecoverableError = (error) => {
     return false;
   }
   
-  // Erros recuperáveis - podem ser retentados
+  // Erros recuperáveis - podem ser retentados (nack / nova entrega Pub/Sub)
   const recoverablePatterns = [
     'network',
     'timeout',
     'connection',
     'temporary',
-    'service unavailable'
+    'service unavailable',
+    'unavailable',
+    'econnreset',
+    'etimedout',
+    'socket',
+    'deadline',
+    'ssl',
+    'tls',
+    'openssl',
+    'internal error',
+    'try again',
+    'resource exhausted',
+    'too many requests'
   ];
   
   return recoverablePatterns.some(pattern => errorMessage.includes(pattern));
@@ -524,6 +549,7 @@ const processMessage = async (message) => {
     avaliacao.audioUpdatedAt = new Date();
     await avaliacao.save();
     addLog('INFO', `✅ Status atualizado: audioTreated=done para avaliacaoId: ${avaliacao._id}`);
+    removeAutoRetryQueueForAvaliacao(avaliacao);
 
     // Notificar backend API sobre conclusão (dispara evento SSE)
     await notifyBackendCompletion(avaliacao._id.toString());

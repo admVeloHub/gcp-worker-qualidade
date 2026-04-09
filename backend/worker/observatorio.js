@@ -432,7 +432,7 @@ router.get('/observatorio', (req, res) => {
         </div>
         
         <div class="section">
-            <h2>Logs Recentes (Últimas 50 — mais recentes no topo)</h2>
+            <h2>Log de Atividades</h2>
             <div id="logs">Carregando...</div>
         </div>
     </div>
