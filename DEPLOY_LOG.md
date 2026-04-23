@@ -1,5 +1,23 @@
 # DEPLOY LOG - Worker de Qualidade de Áudio
 
+## Alteração — segurança Cloud Build / secrets — 2026-04-23
+
+**Data/Hora:** 2026-04-23  
+**Tipo:** Alteração código / segurança (push pendente)  
+**Repositório:** admVeloHub/gcp-worker-qualidade  
+**Branch:** *(a definir)*  
+
+### Descrição:
+`loadFonteVerdadeEnv` partilhado com SKYNET; `cloudbuild.yaml` v1.2.0 com `--update-secrets` para `MONGO_ENV` e `OPENAI_API_KEY`; env não sensível via `--update-env-vars`.
+
+**Arquivos modificados:**
+- `backend/config/loadFonteVerdadeEnv.js` (novo)
+- `backend/worker/audioProcessor.js`
+- `cloudbuild.yaml`
+- `DEPLOY_LOG.md`
+
+---
+
 ## GitHub Push — fila observatório alinhada ao done, retries TLS, BACKEND_API_URL Skynet — 2026-04-09
 
 **Data/Hora:** 2026-04-09  

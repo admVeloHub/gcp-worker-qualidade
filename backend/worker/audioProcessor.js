@@ -1,4 +1,6 @@
-// VERSION: v3.7.1 | DATE: 2026-04-09 | AUTHOR: VeloHub Development Team
+// VERSION: v3.7.3 | DATE: 2026-04-23 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v3.7.3 - Dev: loadFonteVerdadeEnv (FONTE DA VERDADE/.env ou VELOHUB_DOTENV_PATH)
+// CHANGELOG: v3.7.2 - Ao salvar audio_analise_results: gravar avaliacaoIA em qualidade_avaliacoes (nota consensual/fallback)
 // CHANGELOG: v3.7.1 - Sucesso: remove entrada da autoRetryQueue; TLS/gRPC recuperável; comentário BACKEND_API_URL = base Skynet sem /api
 // CHANGELOG: v3.7.0 - audioTreated pending|done|failed; auto-retry sweep; autoRetryQueue; logs/histórico unshift
 // CHANGELOG: v3.6.0 - Buffer de logs do observatório: 50 linhas; GPT só com ENABLE_GPT_ANALYSIS=true (default off)
@@ -7,6 +9,8 @@
 
 // CRÍTICO: Iniciar servidor HTTP IMEDIATAMENTE para Cloud Run
 // Isso deve acontecer antes de qualquer import que possa falhar
+require('../config/loadFonteVerdadeEnv').loadFrom(__dirname);
+
 const express = require('express');
 const PORT = process.env.PORT || 8080;
 
@@ -109,12 +113,6 @@ function loadWorkerModules() {
 }
 
 // Carregar dotenv apenas se existir (opcional para Cloud Run)
-try {
-  require('dotenv').config();
-} catch (error) {
-  // Ignorar erro se dotenv não estiver disponível (normal no Cloud Run)
-}
-
 // Configuração
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID;
 const GCS_BUCKET_NAME = process.env.GCS_BUCKET_NAME || 'qualidade_audio_envio';
@@ -544,6 +542,15 @@ const processMessage = async (message) => {
 
     await audioResult.save();
     addLog('INFO', `✅ Resultado salvo no MongoDB: ${audioResult._id}`);
+
+    const rawNota =
+      audioResult.pontuacaoConsensual ??
+      audioResult.qualityAnalysis?.pontuacao ??
+      audioResult.gptAnalysis?.pontuacao;
+    const notaIA = rawNota != null ? Number(rawNota) : NaN;
+    if (!Number.isNaN(notaIA)) {
+      avaliacao.avaliacaoIA = notaIA;
+    }
 
     avaliacao.audioTreated = 'done';
     avaliacao.audioUpdatedAt = new Date();

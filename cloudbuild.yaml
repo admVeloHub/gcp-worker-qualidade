@@ -1,8 +1,10 @@
-# VERSION: v1.1.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
+# VERSION: v1.2.0 | DATE: 2026-04-23 | AUTHOR: VeloHub Development Team
+# CHANGELOG: v1.2.0 - MONGO_ENV e OPENAI_API_KEY via Secret Manager; demais via --set-env-vars
 # Cloud Build configuration para deploy do Worker no Cloud Run
+#
+# Secrets esperados: MONGO_ENV, OPENAI_API_KEY (ajuste nomes no GCP se diferentes)
 
 steps:
-  # Build da imagem Docker para Worker
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'build'
@@ -14,7 +16,6 @@ steps:
       - 'Dockerfile'
       - '.'
 
-  # Push da imagem para Container Registry
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'push'
@@ -25,45 +26,32 @@ steps:
       - 'push'
       - 'gcr.io/$PROJECT_ID/audio-worker:latest'
 
-  # Deploy no Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: gcloud
+    entrypoint: bash
     args:
-      - 'run'
-      - 'deploy'
-      - 'audio-worker'
-      - '--image'
-      - 'gcr.io/$PROJECT_ID/audio-worker:$SHORT_SHA'
-      - '--region'
-      - 'us-east1'
-      - '--platform'
-      - 'managed'
-      - '--no-allow-unauthenticated'
-      - '--port'
-      - '8080'
-      - '--memory'
-      - '2Gi'
-      - '--cpu'
-      - '2'
-      - '--timeout'
-      - '3600'
-      - '--max-instances'
-      - '5'
-      - '--min-instances'
-      - '0'
-      - '--set-env-vars'
-      - 'GCP_PROJECT_ID=velohub-471220,GCS_BUCKET_NAME=qualidade_audio_envio,PUBSUB_TOPIC_NAME=qualidade_audio_envio,PUBSUB_SUBSCRIPTION_NAME=upload_audio_qualidade,BACKEND_API_URL=https://backend-gcp-278491073220.us-east1.run.app,CONSOLE_ANALISES_DB=console_analises,GCP_LOCATION=us-central1,MAX_RETRIES=3,PORT=8080'
+      - '-c'
+      - |
+        set -e
+        gcloud run deploy audio-worker \
+          --image "gcr.io/$PROJECT_ID/audio-worker:$SHORT_SHA" \
+          --region us-east1 \
+          --platform managed \
+          --no-allow-unauthenticated \
+          --port 8080 \
+          --memory 2Gi \
+          --cpu 2 \
+          --timeout 3600 \
+          --max-instances 5 \
+          --min-instances 0 \
+          --update-env-vars=GCP_PROJECT_ID=velohub-471220,GCS_BUCKET_NAME=qualidade_audio_envio,PUBSUB_TOPIC_NAME=qualidade_audio_envio,PUBSUB_SUBSCRIPTION_NAME=upload_audio_qualidade,BACKEND_API_URL=https://backend-gcp-278491073220.us-east1.run.app,CONSOLE_ANALISES_DB=console_analises,GCP_LOCATION=us-central1,MAX_RETRIES=3,PORT=8080 \
+          --update-secrets=MONGO_ENV=MONGO_ENV:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest
 
-# Imagens a serem armazenadas no Container Registry
 images:
   - 'gcr.io/$PROJECT_ID/audio-worker:$SHORT_SHA'
   - 'gcr.io/$PROJECT_ID/audio-worker:latest'
 
-# Timeout do build (10 minutos)
 timeout: '600s'
 
-# Opções do build
 options:
   machineType: 'E2_HIGHCPU_8'
   logging: CLOUD_LOGGING_ONLY
-

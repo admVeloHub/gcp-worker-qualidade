@@ -1,0 +1,4 @@
+# VERSION: v1.0.0 | DATE: 2026-04-23
+node_modules/
+.env
+.vscode/

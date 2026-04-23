@@ -1,4 +1,5 @@
-// VERSION: v1.2.0 | DATE: 2026-04-08 | AUTHOR: VeloHub Development Team
+// VERSION: v1.3.0 | DATE: 2026-04-09 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v1.3.0 - avaliacaoIA (Number opcional): espelho da nota IA ao salvar audio_analise_results
 // CHANGELOG: v1.2.0 - audioTreated Mixed (pending|done|failed; legado boolean); auto-retry + unlock manual
 // CHANGELOG: v1.1.0 - Substituído dominioAssunto por registroAtendimento, adicionado conformidadeTicket -15pts
 const mongoose = require('mongoose');
@@ -155,6 +156,11 @@ const qualidadeAvaliacaoSchema = new mongoose.Schema({
   pontuacaoTotal: {
     type: Number,
     default: 0
+  },
+  avaliacaoIA: {
+    type: Number,
+    min: -160,
+    max: 100
   },
   // Campos de status de áudio (fundidos de audio_analise_status)
   nomeArquivoAudio: {
