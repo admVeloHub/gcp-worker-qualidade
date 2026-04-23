@@ -1,12 +1,26 @@
 # DEPLOY LOG - Worker de Qualidade de Áudio
 
+## Reescrita de histórico Git (URIs Mongo nos blobs) — 2026-04-23
+
+**Data/Hora:** 2026-04-23  
+**Tipo:** Manutenção repositório / segurança (histórico)  
+**Ferramenta:** `py -m git_filter_repo --replace-text` (URIs Mongo → `REDACTED_*`)  
+**Repositório:** admVeloHub/gcp-worker-qualidade  
+**Branch:** main  
+**Commit (tip `main` após reescrita):** bbdc57b  
+
+### Descrição:
+`git push --force --all` e `git push --force --tags` após filter-repo; tag `checkpoint-before-gpt` reenviada com novo objeto.
+
+---
+
 ## Push GitHub — segurança Cloud Build / secrets — 2026-04-23
 
 **Data/Hora:** 2026-04-23  
 **Tipo:** Push GitHub  
 **Repositório:** admVeloHub/gcp-worker-qualidade  
 **Branch:** main  
-**Commit:** 503fdf8  
+**Commit (código, SHA após reescrita):** ca7c11e  
 
 ### Descrição:
 `loadFonteVerdadeEnv` alinhado ao SKYNET; `cloudbuild.yaml` com `--update-secrets` para `MONGO_ENV` e `OPENAI_API_KEY`; env não sensível via `--update-env-vars`; `.gitignore` com `node_modules/`, `.env`, `.vscode/`.
