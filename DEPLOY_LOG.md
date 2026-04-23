@@ -7,7 +7,7 @@
 **Ferramenta:** `py -m git_filter_repo --replace-text` (URIs Mongo → `REDACTED_*`)  
 **Repositório:** admVeloHub/gcp-worker-qualidade  
 **Branch:** main  
-**Commit (tip `main` após reescrita + registo no log):** 21b2702  
+**Commit:** *(tip `main` = último em `origin/main`; `git log -1` após sincronizar)*  
 
 ### Descrição:
 `git push --force --all` e `git push --force --tags` após filter-repo; tag `checkpoint-before-gpt` reenviada com novo objeto.
