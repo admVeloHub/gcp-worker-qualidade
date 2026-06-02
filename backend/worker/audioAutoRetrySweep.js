@@ -1,4 +1,5 @@
-// VERSION: v1.0.0 | DATE: 2026-04-08 | AUTHOR: VeloHub Development Team
+// VERSION: v1.1.0 | DATE: 2026-06-02 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v1.1.0 - tick imediato ao iniciar sweep (não espera 1º intervalo); execução autônoma do worker
 // Reconciliação: republica no Pub/Sub avaliações sent+pending presas (20 min, +3x8 min, falha no tick seguinte).
 
 const QualidadeAvaliacao = require('../models/QualidadeAvaliacao');
@@ -154,13 +155,16 @@ function startAutoRetrySweep(deps) {
     }
   };
 
-  setInterval(() => {
+  const runTick = () => {
     tick().catch((e) => {
       addLog('ERROR', `auto-retry sweep: ${e.message}`);
     });
-  }, SWEEP_MS);
+  };
 
-  addLog('INFO', `🔄 Auto-retry sweep a cada ${SWEEP_MS / 1000}s (1ª+${FIRST_DELAY_MS / 60000}min, depois ${BETWEEN_MS / 60000}min)`);
+  runTick();
+  setInterval(runTick, SWEEP_MS);
+
+  addLog('INFO', `🔄 Auto-retry sweep autônomo a cada ${SWEEP_MS / 1000}s (1ª+${FIRST_DELAY_MS / 60000}min, depois ${BETWEEN_MS / 60000}min)`);
 }
 
 module.exports = { startAutoRetrySweep, SWEEP_MS, FIRST_DELAY_MS, BETWEEN_MS };

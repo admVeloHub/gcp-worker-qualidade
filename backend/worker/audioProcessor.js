@@ -1,4 +1,5 @@
-// VERSION: v3.7.3 | DATE: 2026-04-23 | AUTHOR: VeloHub Development Team
+// VERSION: v3.7.4 | DATE: 2026-06-02 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v3.7.4 - Auto-retry sweep autônomo: arranque robusto (race Mongo/PubSub); log explícito de dependências
 // CHANGELOG: v3.7.3 - Dev: loadFonteVerdadeEnv (FONTE DA VERDADE/.env ou VELOHUB_DOTENV_PATH)
 // CHANGELOG: v3.7.2 - Ao salvar audio_analise_results: gravar avaliacaoIA em qualidade_avaliacoes (nota consensual/fallback)
 // CHANGELOG: v3.7.1 - Sucesso: remove entrada da autoRetryQueue; TLS/gRPC recuperável; comentário BACKEND_API_URL = base Skynet sem /api
@@ -152,6 +153,7 @@ const recentLogs = [];
 const MAX_LOGS = 50;
 let sweepStarted = false;
 let mongoSucceeded = false;
+let sweepWaitLogged = false;
 
 const pushAutoRetryQueue = (entry) => {
   const id = entry.avaliacaoId;
@@ -164,8 +166,19 @@ const pushAutoRetryQueue = (entry) => {
 };
 
 const tryStartAutoRetrySweep = () => {
-  if (sweepStarted || !mongoSucceeded || !pubsub) return;
+  if (sweepStarted) return;
+  if (!mongoSucceeded || !pubsub) {
+    if (!sweepWaitLogged) {
+      sweepWaitLogged = true;
+      addLog(
+        'INFO',
+        `⏳ Auto-retry sweep aguardando dependências (mongo=${mongoSucceeded}, pubsub=${!!pubsub})`
+      );
+    }
+    return;
+  }
   sweepStarted = true;
+  addLog('INFO', '🔄 Iniciando auto-retry sweep em background (independente do observatório)');
   startAutoRetrySweep({
     addLog,
     recordQueue: pushAutoRetryQueue,

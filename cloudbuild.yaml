@@ -1,4 +1,5 @@
-# VERSION: v1.2.0 | DATE: 2026-04-23 | AUTHOR: VeloHub Development Team
+# VERSION: v1.3.0 | DATE: 2026-06-02 | AUTHOR: VeloHub Development Team
+# CHANGELOG: v1.3.0 - min-instances 1 + no-cpu-throttling: sweep Pub/Sub e auto-retry sem depender de HTTP/observatório
 # CHANGELOG: v1.2.0 - MONGO_ENV e OPENAI_API_KEY via Secret Manager; demais via --set-env-vars
 # Cloud Build configuration para deploy do Worker no Cloud Run
 #
@@ -42,7 +43,8 @@ steps:
           --cpu 2 \
           --timeout 3600 \
           --max-instances 5 \
-          --min-instances 0 \
+          --min-instances 1 \
+          --no-cpu-throttling \
           --update-env-vars=GCP_PROJECT_ID=velohub-471220,GCS_BUCKET_NAME=qualidade_audio_envio,PUBSUB_TOPIC_NAME=qualidade_audio_envio,PUBSUB_SUBSCRIPTION_NAME=upload_audio_qualidade,BACKEND_API_URL=https://backend-gcp-278491073220.us-east1.run.app,CONSOLE_ANALISES_DB=console_analises,GCP_LOCATION=us-central1,MAX_RETRIES=3,PORT=8080 \
           --update-secrets=MONGO_ENV=MONGO_ENV:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest
 

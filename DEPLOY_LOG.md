@@ -1,5 +1,26 @@
 # DEPLOY LOG - Worker de Qualidade de Áudio
 
+## GitHub Push — auto-retry autônomo (Cloud Run min-instances + no-cpu-throttling) — 2026-06-02
+
+**Data/Hora:** 2026-06-02  
+**Tipo:** Push GitHub  
+**Repositório:** admVeloHub/gcp-worker-qualidade  
+**Branch:** main  
+
+### Descrição:
+Correção do auto-retry que só executava com o observatório aberto: o sweep e o listener Pub/Sub dependiam de CPU alocada por requisições HTTP no Cloud Run (`min-instances 0` + CPU throttling). Worker passa a rodar sweep e retries em background sem browser.
+
+**Arquivos modificados:**
+- `cloudbuild.yaml` (v1.3.0) — `--min-instances 1` e `--no-cpu-throttling` para tarefas assíncronas
+- `backend/worker/audioAutoRetrySweep.js` (v1.1.0) — tick imediato ao iniciar o sweep
+- `backend/worker/audioProcessor.js` (v3.7.4) — arranque robusto do sweep; logs de dependências Mongo/PubSub
+- `DEPLOY_LOG.md`
+
+**Impacto:**
+- Auto-retry e processamento Pub/Sub continuam com observatório fechado; deploy Cloud Run necessário para aplicar flags de infra
+
+---
+
 ## Reescrita de histórico Git (URIs Mongo nos blobs) — 2026-04-23
 
 **Data/Hora:** 2026-04-23  
