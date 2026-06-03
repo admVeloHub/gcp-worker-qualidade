@@ -1,4 +1,5 @@
-# VERSION: v1.3.0 | DATE: 2026-06-02 | AUTHOR: VeloHub Development Team
+# VERSION: v1.4.0 | DATE: 2026-06-02 | AUTHOR: VeloHub Development Team
+# CHANGELOG: v1.4.0 - deploy no serviço worker-qualidade (URL do observatório); não mais audio-worker
 # CHANGELOG: v1.3.0 - min-instances 1 + no-cpu-throttling: sweep Pub/Sub e auto-retry sem depender de HTTP/observatório
 # CHANGELOG: v1.2.0 - MONGO_ENV e OPENAI_API_KEY via Secret Manager; demais via --set-env-vars
 # Cloud Build configuration para deploy do Worker no Cloud Run
@@ -33,7 +34,7 @@ steps:
       - '-c'
       - |
         set -e
-        gcloud run deploy audio-worker \
+        gcloud run deploy worker-qualidade \
           --image "gcr.io/$PROJECT_ID/audio-worker:$SHORT_SHA" \
           --region us-east1 \
           --platform managed \

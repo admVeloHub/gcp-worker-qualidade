@@ -1,6 +1,8 @@
-// VERSION: v1.1.0 | DATE: 2026-06-02 | AUTHOR: VeloHub Development Team
+// VERSION: v1.3.0 | DATE: 2026-06-02 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v1.3.0 - tick retorna pendentes; backlog imediato (audioSent+pending); sinal onPendingWork
+// CHANGELOG: v1.2.0 - processamento direto no sweep (sem depender do pull Pub/Sub); getSweepTick para /worker/reconcile
 // CHANGELOG: v1.1.0 - tick imediato ao iniciar sweep (não espera 1º intervalo); execução autônoma do worker
-// Reconciliação: republica no Pub/Sub avaliações sent+pending presas (20 min, +3x8 min, falha no tick seguinte).
+// Reconciliação: avaliações sent+pending presas (20 min 1ª ação, +3x8 min, falha após 3 tentativas).
 
 const QualidadeAvaliacao = require('../models/QualidadeAvaliacao');
 
@@ -10,6 +12,11 @@ const BETWEEN_MS = parseInt(process.env.AUDIO_AUTO_RETRY_BETWEEN_MS || String(8 
 const MANUAL_UNLOCK_MS = parseInt(process.env.AUDIO_MANUAL_UNLOCK_MS || String(15 * 60 * 1000), 10);
 const MAX_AUTO_ATTEMPTS = 3;
 const PUBSUB_TOPIC_NAME = process.env.PUBSUB_TOPIC_NAME || 'qualidade_audio_envio';
+const SWEEP_DIRECT_PROCESS = process.env.SWEEP_DIRECT_PROCESS !== 'false';
+/** Pendente com audioSent: tentar ação no sweep mesmo antes do timer de 20 min (drenagem de backlog). */
+const BACKLOG_IMMEDIATE = process.env.BACKLOG_IMMEDIATE !== 'false';
+
+let activeSweepTick = null;
 
 function isDone(t) {
   return t === true || t === 'done';
@@ -32,6 +39,26 @@ function formatCountdown(ms) {
   return m > 0 ? `${m}m ${rs}s` : `${rs}s`;
 }
 
+function shouldActOnPending(doc, now) {
+  const attempts = doc.audioAutoRepublishAttempts || 0;
+  const created = doc.audioCreatedAt || doc.audioUpdatedAt;
+  const lastAuto = doc.audioLastAutoRepublishAt ? new Date(doc.audioLastAutoRepublishAt).getTime() : 0;
+  const baseCreated = created ? new Date(created).getTime() : now;
+
+  if (attempts >= MAX_AUTO_ATTEMPTS) return false;
+
+  if (attempts === 0 && now - baseCreated >= FIRST_DELAY_MS) return true;
+  if (attempts > 0 && attempts < MAX_AUTO_ATTEMPTS && lastAuto && now - lastAuto >= BETWEEN_MS) {
+    return true;
+  }
+
+  if (BACKLOG_IMMEDIATE && doc.audioSent === true) {
+    return true;
+  }
+
+  return false;
+}
+
 async function publishAudioMessage(pubsub, fileName, bucketName) {
   const topic = pubsub.topic(PUBSUB_TOPIC_NAME);
   const [exists] = await topic.exists();
@@ -49,22 +76,22 @@ async function publishAudioMessage(pubsub, fileName, bucketName) {
 }
 
 /**
- * @param {{ addLog: Function, recordQueue: Function, getPubSub: () => any, bucketName: string }} deps
+ * @param {{ addLog: Function, recordQueue: Function, getPubSub: () => any, bucketName: string, processDirect?: Function, onPendingWork?: Function }} deps
  */
 function startAutoRetrySweep(deps) {
-  const { addLog, recordQueue, getPubSub, bucketName } = deps;
+  const { addLog, recordQueue, getPubSub, bucketName, processDirect, onPendingWork } = deps;
 
   const tick = async () => {
     const pubsub = getPubSub();
     if (!pubsub) {
-      return;
+      return 0;
     }
     let Model;
     try {
       Model = await QualidadeAvaliacao.model();
     } catch (e) {
       addLog('WARN', `auto-retry: modelo indisponível: ${e.message}`);
-      return;
+      return 0;
     }
 
     const now = Date.now();
@@ -79,13 +106,16 @@ function startAutoRetrySweep(deps) {
         .exec();
     } catch (e) {
       addLog('ERROR', `auto-retry: query falhou: ${e.message}`);
-      return;
+      return 0;
     }
+
+    let pendingLeft = 0;
 
     for (const doc of candidates) {
       const t = doc.audioTreated;
       if (!isPendingLike(t)) continue;
 
+      pendingLeft++;
       const attempts = doc.audioAutoRepublishAttempts || 0;
       const created = doc.audioCreatedAt || doc.audioUpdatedAt;
       const lastAuto = doc.audioLastAutoRepublishAt ? new Date(doc.audioLastAutoRepublishAt).getTime() : 0;
@@ -104,17 +134,13 @@ function startAutoRetrySweep(deps) {
           mode: 'failed_final',
           attempts
         });
+        pendingLeft--;
         continue;
       }
 
-      let shouldRepublish = false;
-      if (attempts === 0 && now - baseCreated >= FIRST_DELAY_MS) {
-        shouldRepublish = true;
-      } else if (attempts > 0 && attempts < MAX_AUTO_ATTEMPTS && lastAuto && now - lastAuto >= BETWEEN_MS) {
-        shouldRepublish = true;
-      }
+      const shouldAct = shouldActOnPending(doc, now);
 
-      if (!shouldRepublish) {
+      if (!shouldAct) {
         let nextIn = 0;
         if (attempts === 0) {
           nextIn = FIRST_DELAY_MS - (now - baseCreated);
@@ -135,6 +161,25 @@ function startAutoRetrySweep(deps) {
         continue;
       }
 
+      if (SWEEP_DIRECT_PROCESS && typeof processDirect === 'function') {
+        try {
+          const handled = await processDirect(doc);
+          if (handled) {
+            recordQueue({
+              ts: new Date().toISOString(),
+              avaliacaoId: String(doc._id),
+              fileName: doc.nomeArquivoAudio,
+              mode: 'processed_direct',
+              attempt: attempts
+            });
+            pendingLeft--;
+            continue;
+          }
+        } catch (e) {
+          addLog('WARN', `sweep direct falhou ${doc.nomeArquivoAudio}, republicando: ${e.message}`);
+        }
+      }
+
       try {
         await publishAudioMessage(pubsub, doc.nomeArquivoAudio, bucketName);
         doc.audioAutoRepublishAttempts = attempts + 1;
@@ -153,7 +198,15 @@ function startAutoRetrySweep(deps) {
         addLog('ERROR', `auto-retry publish falhou ${doc.nomeArquivoAudio}: ${e.message}`);
       }
     }
+
+    if (pendingLeft > 0 && typeof onPendingWork === 'function') {
+      onPendingWork(pendingLeft);
+    }
+
+    return pendingLeft;
   };
+
+  activeSweepTick = tick;
 
   const runTick = () => {
     tick().catch((e) => {
@@ -164,7 +217,20 @@ function startAutoRetrySweep(deps) {
   runTick();
   setInterval(runTick, SWEEP_MS);
 
-  addLog('INFO', `🔄 Auto-retry sweep autônomo a cada ${SWEEP_MS / 1000}s (1ª+${FIRST_DELAY_MS / 60000}min, depois ${BETWEEN_MS / 60000}min)`);
+  addLog(
+    'INFO',
+    `🔄 Sweep autônomo ${SWEEP_MS / 1000}s | direct=${SWEEP_DIRECT_PROCESS} | backlog_immediate=${BACKLOG_IMMEDIATE}`
+  );
 }
 
-module.exports = { startAutoRetrySweep, SWEEP_MS, FIRST_DELAY_MS, BETWEEN_MS };
+function getSweepTick() {
+  return activeSweepTick;
+}
+
+module.exports = {
+  startAutoRetrySweep,
+  getSweepTick,
+  SWEEP_MS,
+  FIRST_DELAY_MS,
+  BETWEEN_MS
+};

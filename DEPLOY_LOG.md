@@ -1,5 +1,27 @@
 # DEPLOY LOG - Worker de Qualidade de Áudio
 
+## GitHub Push — loop de fila ativa + drenagem backlog (sem observatório/Scheduler) — 2026-06-02
+
+**Data/Hora:** 2026-06-02  
+**Tipo:** Push GitHub  
+**Repositório:** admVeloHub/gcp-worker-qualidade  
+**Branch:** main  
+
+### Descrição:
+Fila parada dias e processada ao abrir observatório: o sweep/retry existia mas o processo no Cloud Run não executava timers nem pull Pub/Sub sem CPU (throttling). Correção em código: loop interno até zerar pendentes, processamento direto no sweep, drenagem no arranque; deploy alvo `worker-qualidade` com `min-instances 1` e `no-cpu-throttling`.
+
+**Arquivos modificados:**
+- `backend/worker/audioProcessor.js` (v3.9.0) — `signalPendingWork`, `ensurePendingWorkLoop`, `drainBacklogOnReady`
+- `backend/worker/audioAutoRetrySweep.js` (v1.3.0) — `BACKLOG_IMMEDIATE`, processamento direto, `onPendingWork`
+- `cloudbuild.yaml` (v1.4.0) — `gcloud run deploy worker-qualidade`
+- `env.example` (v1.2.2)
+- `DEPLOY_LOG.md`
+
+**Impacto:**
+- Worker processa backlog no arranque e mantém ciclo a cada 15s enquanto houver pendente; não depende de abrir `/observatorio` nem Cloud Scheduler
+
+---
+
 ## GitHub Push — auto-retry autônomo (Cloud Run min-instances + no-cpu-throttling) — 2026-06-02
 
 **Data/Hora:** 2026-06-02  

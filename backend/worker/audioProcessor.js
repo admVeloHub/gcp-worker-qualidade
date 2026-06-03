@@ -1,4 +1,6 @@
-// VERSION: v3.7.4 | DATE: 2026-06-02 | AUTHOR: VeloHub Development Team
+// VERSION: v3.9.0 | DATE: 2026-06-02 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v3.9.0 - Loop interno de fila ativa até zerar pendentes; drenagem backlog no arranque; sem depender de HTTP/observatório
+// CHANGELOG: v3.8.0 - processAudioByFileName + sweep direct; deploy worker-qualidade; /worker/reconcile; Pub/Sub flowControl
 // CHANGELOG: v3.7.4 - Auto-retry sweep autônomo: arranque robusto (race Mongo/PubSub); log explícito de dependências
 // CHANGELOG: v3.7.3 - Dev: loadFonteVerdadeEnv (FONTE DA VERDADE/.env ou VELOHUB_DOTENV_PATH)
 // CHANGELOG: v3.7.2 - Ao salvar audio_analise_results: gravar avaliacaoIA em qualidade_avaliacoes (nota consensual/fallback)
@@ -23,7 +25,7 @@ basicApp.use(express.json());
 basicApp.get('/', (req, res) => {
   res.status(200).json({ 
     status: 'ok', 
-    service: 'audio-worker',
+    service: process.env.K_SERVICE || 'worker-qualidade',
     timestamp: new Date().toISOString()
   });
 });
@@ -122,7 +124,7 @@ const PUBSUB_TOPIC_NAME = process.env.PUBSUB_TOPIC_NAME || 'qualidade_audio_envi
 const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3', 10);
 /** Origem do Skynet (sem /api). Cloud Run: definir BACKEND_API_URL nas variáveis do serviço worker. */
 const BACKEND_API_URL = process.env.BACKEND_API_URL || 'http://localhost:3001';
-const startAutoRetrySweep = require('./audioAutoRetrySweep').startAutoRetrySweep;
+const { startAutoRetrySweep, getSweepTick } = require('./audioAutoRetrySweep');
 // Só envia para GPT/OpenAI quando ENABLE_GPT_ANALYSIS=true explicitamente (default: não enviar)
 const ENABLE_GPT_ANALYSIS = process.env.ENABLE_GPT_ANALYSIS === 'true';
 
@@ -155,6 +157,11 @@ let sweepStarted = false;
 let mongoSucceeded = false;
 let sweepWaitLogged = false;
 
+const PENDING_WORK_ACTIVE_MS = parseInt(process.env.PENDING_WORK_ACTIVE_MS || '15000', 10);
+const BACKLOG_DRAIN_MAX_ROUNDS = parseInt(process.env.BACKLOG_DRAIN_MAX_ROUNDS || '500', 10);
+let pendingWorkInterval = null;
+let backlogDrainRunning = false;
+
 const pushAutoRetryQueue = (entry) => {
   const id = entry.avaliacaoId;
   if (id) {
@@ -183,8 +190,118 @@ const tryStartAutoRetrySweep = () => {
     addLog,
     recordQueue: pushAutoRetryQueue,
     getPubSub: () => pubsub,
-    bucketName: GCS_BUCKET_NAME
+    bucketName: GCS_BUCKET_NAME,
+    processDirect: processPendingDocDirect,
+    onPendingWork: (n) => signalPendingWork(`sweep:${n}`)
   });
+};
+
+const countMongoPendingAudio = async () => {
+  try {
+    const Model = await QualidadeAvaliacao.model();
+    return await Model.countDocuments({
+      audioSent: true,
+      nomeArquivoAudio: { $exists: true, $nin: [null, ''] },
+      $nor: [{ audioTreated: 'done' }, { audioTreated: true }, { audioTreated: 'failed' }]
+    });
+  } catch (e) {
+    addLog('WARN', `count pendentes: ${e.message}`);
+    return 0;
+  }
+};
+
+const hasInFlightProcessing = () => stats.processingMessages.size > 0;
+
+const runQueueReconcileCycle = async () => {
+  const tick = getSweepTick();
+  if (tick) {
+    await tick();
+  }
+  const mongoPending = await countMongoPendingAudio();
+  return mongoPending > 0 || hasInFlightProcessing();
+};
+
+const signalPendingWork = (reason) => {
+  addLog('INFO', `📌 Fila com trabalho pendente (${reason}) — worker permanece ativo`);
+  ensurePendingWorkLoop();
+};
+
+const ensurePendingWorkLoop = () => {
+  if (pendingWorkInterval) return;
+  addLog('INFO', `🔥 Loop de fila a cada ${PENDING_WORK_ACTIVE_MS / 1000}s até concluir todos os áudios`);
+  pendingWorkInterval = setInterval(async () => {
+    try {
+      const still = await runQueueReconcileCycle();
+      if (!still) {
+        clearInterval(pendingWorkInterval);
+        pendingWorkInterval = null;
+        addLog('INFO', '✅ Nenhum áudio pendente — loop de fila encerrado');
+      }
+    } catch (e) {
+      addLog('ERROR', `loop fila pendente: ${e.message}`);
+    }
+  }, PENDING_WORK_ACTIVE_MS);
+};
+
+const drainBacklogOnReady = async () => {
+  if (backlogDrainRunning || !mongoSucceeded || !speechClientInstance || !genAIInstance) {
+    return;
+  }
+  backlogDrainRunning = true;
+  try {
+    const initial = await countMongoPendingAudio();
+    if (initial === 0) {
+      addLog('INFO', '📥 Arranque: nenhum áudio pendente no Mongo');
+      return;
+    }
+    addLog('INFO', `📥 Arranque: drenando ${initial} áudio(s) pendente(s) sem aguardar observatório`);
+    signalPendingWork('startup-backlog');
+    let rounds = 0;
+    while (rounds < BACKLOG_DRAIN_MAX_ROUNDS) {
+      const still = await runQueueReconcileCycle();
+      if (!still) break;
+      rounds++;
+      if (hasInFlightProcessing()) {
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+    }
+    const left = await countMongoPendingAudio();
+    addLog('INFO', `📥 Drenagem de arranque: ${rounds} ciclo(s), restantes=${left}`);
+  } finally {
+    backlogDrainRunning = false;
+  }
+};
+
+const isFileCurrentlyProcessing = (fileName) => {
+  for (const [, info] of stats.processingMessages) {
+    if (info && info.fileName === fileName) return true;
+  }
+  return false;
+};
+
+/**
+ * Processa um áudio pendente diretamente (sweep), sem depender do pull Pub/Sub.
+ * @returns {Promise<boolean>} true se concluiu ou já estava tratado
+ */
+const processPendingDocDirect = async (doc) => {
+  if (!speechClientInstance || !genAIInstance) {
+    return false;
+  }
+  const fileName = doc.nomeArquivoAudio;
+  if (!fileName || isFileCurrentlyProcessing(fileName)) {
+    return false;
+  }
+  const messageId = `sweep-${doc._id}-${Date.now()}`;
+  try {
+    const outcome = await processAudioByFileName(fileName, GCS_BUCKET_NAME, {
+      messageId,
+      source: 'sweep'
+    });
+    return outcome === 'ok' || outcome === 'skipped';
+  } catch (e) {
+    addLog('ERROR', `sweep direct ${fileName}: ${e.message}`);
+    return false;
+  }
 };
 
 const addLog = (level, message) => {
@@ -222,7 +339,13 @@ const initializePubSub = () => {
 
     pubsub = new PubSub({ projectId: GCP_PROJECT_ID });
     subscription = pubsub.subscription(PUBSUB_SUBSCRIPTION_NAME);
-    
+    subscription.setOptions({
+      flowControl: {
+        maxMessages: 5,
+        allowExcessMessages: false
+      }
+    });
+
     console.log('✅ Pub/Sub inicializado');
     console.log(`📡 Escutando subscription: ${PUBSUB_SUBSCRIPTION_NAME}`);
     
@@ -370,103 +493,59 @@ const processAudio = async (gcsUri, fileName) => {
 };
 
 /**
- * Processar mensagem do Pub/Sub
- * @param {object} message - Mensagem recebida do Pub/Sub
+ * Processa um arquivo de áudio (Pub/Sub ou sweep direto).
+ * @returns {Promise<'ok'|'skipped'>}
  */
-const processMessage = async (message) => {
-  const messageId = message.id;
+const processAudioByFileName = async (fileName, bucketName, { messageId, source = 'pubsub' } = {}) => {
+  const jobId = messageId || `${source}-${fileName}-${Date.now()}`;
+  const gcsUri = `gs://${bucketName}/${fileName}`;
+
+  addLog('INFO', `🔄 Processando arquivo (${source}): ${fileName}`);
+  addLog('DEBUG', `📍 GCS URI: ${gcsUri}`);
+
+  stats.processingMessages.set(jobId, {
+    fileName,
+    startTime: Date.now()
+  });
+
   let avaliacao = null;
-  let retryCount = messageRetries.get(messageId) || 0;
-  
+
   try {
-    addLog('INFO', `📨 Mensagem recebida do Pub/Sub [ID: ${messageId}]`);
-    
-    // Parse da mensagem do GCS
-    const data = JSON.parse(message.data.toString());
-    addLog('DEBUG', `📋 Dados da mensagem: ${JSON.stringify(data, null, 2)}`);
-
-    // Extrair informações do evento GCS
-    const fileName = data.name || data.object || data.fileName;
-    const bucketName = data.bucket || data.bucketName || GCS_BUCKET_NAME;
-    
-    if (!fileName) {
-      throw new Error('Nome do arquivo não encontrado na mensagem');
-    }
-
-    // Construir URI do GCS
-    const gcsUri = `gs://${bucketName}/${fileName}`;
-    addLog('INFO', `🔄 Processando arquivo: ${fileName}`);
-    addLog('DEBUG', `📍 GCS URI: ${gcsUri}`);
-
-    // Registrar início do processamento
-    stats.processingMessages.set(messageId, {
-      fileName,
-      startTime: Date.now()
-    });
-
-    // 1. Verificar se arquivo já foi processado (ANTES de buscar avaliação)
-    let ResultModel = await AudioAnaliseResult.model();
+    const ResultModel = await AudioAnaliseResult.model();
     const existingResult = await ResultModel.findOne({ nomeArquivo: fileName });
-    
+
     if (existingResult) {
       addLog('INFO', `ℹ️  Arquivo ${fileName} já foi processado anteriormente. Ignorando.`);
-      // Limpar contador de retries e mensagem em processamento
-      messageRetries.delete(messageId);
-      stats.processingMessages.delete(messageId);
-      // Confirmar mensagem (arquivo já processado - não reprocessar)
-      message.ack();
-      return;
+      messageRetries.delete(jobId);
+      stats.processingMessages.delete(jobId);
+      return 'skipped';
     }
 
-    // 2. Buscar avaliação pelo nomeArquivoAudio no MongoDB (já preenchido no upload)
     const QualidadeAvaliacaoModel = await QualidadeAvaliacao.model();
     avaliacao = await QualidadeAvaliacaoModel.findOne({ nomeArquivoAudio: fileName });
-    
+
     if (!avaliacao) {
-      addLog('WARN', `⚠️  Avaliação não encontrada para arquivo: ${fileName}`);
-      // Erro não recuperável - fazer ack() imediatamente para remover da fila
-      const error = new Error(`Avaliação não encontrada para arquivo ${fileName}. O arquivo deve estar associado a uma avaliação existente.`);
-      
-      // Atualizar estatísticas
-      stats.totalProcessed++;
-      stats.totalFailed++;
-      
-      // Adicionar ao histórico
-      const processingInfo = stats.processingMessages.get(messageId);
-      const processingTime = processingInfo ? (Date.now() - processingInfo.startTime) / 1000 : 0;
-      
-      stats.messageHistory.unshift({
-        messageId,
-        fileName,
-        status: 'failed',
-        error: error.message,
-        processingTime,
-        timestamp: new Date().toISOString()
-      });
-      if (stats.messageHistory.length > 50) stats.messageHistory.pop();
-      
-      messageRetries.delete(messageId);
-      stats.processingMessages.delete(messageId);
-      
-      message.ack();
-      addLog('INFO', `✅ Mensagem removida da fila (erro não recuperável) [ID: ${messageId}]`);
-      return;
+      const error = new Error(
+        `Avaliação não encontrada para arquivo ${fileName}. O arquivo deve estar associado a uma avaliação existente.`
+      );
+      messageRetries.delete(jobId);
+      stats.processingMessages.delete(jobId);
+      if (source === 'pubsub') {
+        throw error;
+      }
+      addLog('WARN', `⚠️  ${error.message}`);
+      return 'skipped';
     }
-    
-    // 3. Verificar se avaliação já foi processada
+
     if (avaliacao.audioTreated === 'done' || avaliacao.audioTreated === true) {
       addLog('INFO', `ℹ️  Arquivo ${fileName} já foi processado para avaliação ${avaliacao._id}. Ignorando.`);
-      // Limpar contador de retries e mensagem em processamento
-      messageRetries.delete(messageId);
-      stats.processingMessages.delete(messageId);
-      // Confirmar mensagem (já processado - não reprocessar)
-      message.ack();
-      return;
+      messageRetries.delete(jobId);
+      stats.processingMessages.delete(jobId);
+      return 'skipped';
     }
-    
+
     addLog('INFO', `✅ Avaliação encontrada: ${avaliacao._id} para arquivo: ${fileName}`);
 
-    // Processar áudio
     const analysisResult = await processAudio(gcsUri, fileName);
 
     // Copiar critérios não verificáveis pela IA da avaliação manual
@@ -579,27 +658,64 @@ const processMessage = async (message) => {
     stats.totalSuccess++;
     stats.lastMessageTime = Date.now();
     
-    // Adicionar ao histórico
-    const processingInfo = stats.processingMessages.get(messageId);
+    const processingInfo = stats.processingMessages.get(jobId);
     const processingTime = processingInfo ? (Date.now() - processingInfo.startTime) / 1000 : 0;
-    
-      stats.messageHistory.unshift({
-        messageId,
-        fileName,
-        status: 'success',
-        processingTime,
-        timestamp: new Date().toISOString()
-      });
-      if (stats.messageHistory.length > 50) stats.messageHistory.pop();
 
-      // Limpar contador de retries e mensagem em processamento
-      messageRetries.delete(messageId);
-      stats.processingMessages.delete(messageId);
+    stats.messageHistory.unshift({
+      messageId: jobId,
+      fileName,
+      status: 'success',
+      processingTime,
+      timestamp: new Date().toISOString()
+    });
+    if (stats.messageHistory.length > 50) stats.messageHistory.pop();
 
-      // Confirmar mensagem processada
-      message.ack();
-    addLog('INFO', `✅ Mensagem processada e confirmada [ID: ${messageId}]`);
-    
+    messageRetries.delete(jobId);
+    stats.processingMessages.delete(jobId);
+
+    addLog('INFO', `✅ Processamento concluído (${source}) [ID: ${jobId}]`);
+    return 'ok';
+  } catch (error) {
+    messageRetries.delete(jobId);
+    stats.processingMessages.delete(jobId);
+    addLog('ERROR', `❌ Erro ao processar ${fileName} (${source}) [ID: ${jobId}]: ${error.message}`);
+    throw error;
+  }
+};
+
+/**
+ * Processar mensagem do Pub/Sub
+ * @param {object} message - Mensagem recebida do Pub/Sub
+ */
+const processMessage = async (message) => {
+  const messageId = message.id;
+  let avaliacao = null;
+  let retryCount = messageRetries.get(messageId) || 0;
+
+  try {
+    addLog('INFO', `📨 Mensagem recebida do Pub/Sub [ID: ${messageId}]`);
+    signalPendingWork('pubsub-message');
+
+    const data = JSON.parse(message.data.toString());
+    addLog('DEBUG', `📋 Dados da mensagem: ${JSON.stringify(data, null, 2)}`);
+
+    const fileName = data.name || data.object || data.fileName;
+    const bucketName = data.bucket || data.bucketName || GCS_BUCKET_NAME;
+
+    if (!fileName) {
+      throw new Error('Nome do arquivo não encontrado na mensagem');
+    }
+
+    const outcome = await processAudioByFileName(fileName, bucketName, {
+      messageId,
+      source: 'pubsub'
+    });
+
+    message.ack();
+    if (outcome === 'ok') {
+      addLog('INFO', `✅ Mensagem processada e confirmada [ID: ${messageId}]`);
+    }
+    return;
   } catch (error) {
     addLog('ERROR', `❌ Erro ao processar mensagem [ID: ${messageId}]: ${error.message}`);
     
@@ -710,6 +826,54 @@ const initializeMongoDB = async () => {
  */
 const addRoutesToServer = () => {
   try {
+    basicApp.post('/worker/reconcile', async (req, res) => {
+      try {
+        const tick = getSweepTick();
+        if (!tick) {
+          tryStartAutoRetrySweep();
+          return res.status(503).json({
+            ok: false,
+            reason: 'sweep_not_started',
+            service: process.env.K_SERVICE || null
+          });
+        }
+        await tick();
+        res.json({
+          ok: true,
+          service: process.env.K_SERVICE || null,
+          sweepStarted,
+          mongoSucceeded,
+          pubsubReady: !!pubsub
+        });
+      } catch (e) {
+        res.status(500).json({ ok: false, error: e.message });
+      }
+    });
+
+    basicApp.get('/worker/reconcile', async (req, res) => {
+      try {
+        const tick = getSweepTick();
+        if (!tick) {
+          tryStartAutoRetrySweep();
+          return res.status(503).json({
+            ok: false,
+            reason: 'sweep_not_started',
+            service: process.env.K_SERVICE || null
+          });
+        }
+        await tick();
+        res.json({
+          ok: true,
+          service: process.env.K_SERVICE || null,
+          sweepStarted,
+          mongoSucceeded,
+          pubsubReady: !!pubsub
+        });
+      } catch (e) {
+        res.status(500).json({ ok: false, error: e.message });
+      }
+    });
+
     // Adicionar routers de forma segura (se falharem, servidor básico continua funcionando)
     try {
       basicApp.use('/', healthCheckRouter);
@@ -752,8 +916,9 @@ const addRoutesToServer = () => {
 const startWorker = async () => {
   try {
     addLog('INFO', '🚀 Iniciando worker...');
+    addLog('INFO', `☁️  Serviço Cloud Run: ${process.env.K_SERVICE || '(local)'}`);
     addLog('INFO', '✅ Servidor HTTP já iniciado - Cloud Run pode verificar saúde');
-    
+
     // 2. Inicializar componentes em background (não bloqueia servidor)
     // MongoDB
     initializeMongoDB().then(() => {
@@ -783,7 +948,11 @@ const startWorker = async () => {
       speechClientInstance = speechClient;
       genAIInstance = genAI;
       addLog('INFO', '✅ Vertex AI inicializado com sucesso');
-      
+      tryStartAutoRetrySweep();
+      drainBacklogOnReady().catch((e) => {
+        addLog('ERROR', `drenagem backlog: ${e.message}`);
+      });
+
       // Registrar instâncias para health check quando tudo estiver pronto
       if (subscription && speechClientInstance && genAIInstance) {
         registerWorkerInstances(subscription, speechClientInstance, genAIInstance);
@@ -844,7 +1013,9 @@ module.exports = {
   getStats: () => ({
     ...stats,
     processingMessages: Array.from(stats.processingMessages.entries()),
-    autoRetryQueue: stats.autoRetryQueue || []
+    autoRetryQueue: stats.autoRetryQueue || [],
+    queueLoopActive: !!pendingWorkInterval,
+    cloudRunService: process.env.K_SERVICE || null
   }),
   getLogs: () => recentLogs
 };
