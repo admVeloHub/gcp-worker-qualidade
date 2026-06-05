@@ -1,4 +1,5 @@
-// VERSION: v4.1.1 | DATE: 2026-06-03 | AUTHOR: VeloHub Development Team
+// VERSION: v4.2.0 | DATE: 2026-06-05 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v4.2.0 - processPendingDocDirect retorna ok|skipped|in_flight|error (sweep não republica em in_flight)
 // CHANGELOG: v4.1.1 - Porta local via WORKER da FONTE DA VERDADE (.env); Cloud Run continua PORT=8080
 // CHANGELOG: v4.1.0 - Heartbeat interno; fila serial; espera GCS; mongo/sweep autonomos; erros recuperaveis por padrao
 // CHANGELOG: v4.0.0 - Pipeline Gemini transcricao+analiseDialogo; GPT RAG obrigatorio; persistencia LISTA audio_analise_results
@@ -355,16 +356,19 @@ const isFileCurrentlyProcessing = (fileName) => {
 
 /**
  * Processa um áudio pendente diretamente (sweep), sem depender do pull Pub/Sub.
- * @returns {Promise<boolean>} true se concluiu ou já estava tratado
+ * @returns {Promise<'ok'|'skipped'|'in_flight'|'error'>}
  */
 const processPendingDocDirect = async (doc) => {
   const fileName = doc.nomeArquivoAudio;
-  if (!fileName || isFileCurrentlyProcessing(fileName)) {
-    return false;
+  if (!fileName) {
+    return 'error';
+  }
+  if (isFileCurrentlyProcessing(fileName)) {
+    return 'in_flight';
   }
   await ensureMongoReady();
   if (!genAIInstance) {
-    return false;
+    return 'error';
   }
   try {
     const outcome = await enqueueSerialTask(
@@ -375,10 +379,12 @@ const processPendingDocDirect = async (doc) => {
         }),
       `sweep:${fileName}`
     );
-    return outcome === 'ok' || outcome === 'skipped';
+    if (outcome === 'ok') return 'ok';
+    if (outcome === 'skipped') return 'skipped';
+    return 'error';
   } catch (e) {
     addLog('ERROR', `sweep direct ${fileName}: ${e.message}`);
-    return false;
+    return 'error';
   }
 };
 

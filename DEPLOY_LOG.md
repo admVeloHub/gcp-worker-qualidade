@@ -1,5 +1,57 @@
 # DEPLOY LOG - Worker de Qualidade de Áudio
 
+## GitHub Push — sweep in_flight sem republicar + timeout Gemini 10min — 2026-06-05
+
+**Data/Hora:** 2026-06-05  
+**Tipo:** Push GitHub  
+**Repositório:** admVeloHub/gcp-worker-qualidade  
+**Branch:** main  
+
+### Descrição:
+Corrige sweep republicando áudio já em processamento: `processPendingDocDirect` retorna `ok|skipped|in_flight|error`; estado `in_flight` não incrementa tentativas nem publica no Pub/Sub. Mutex no tick do sweep. Timeout Gemini configurável `GEMINI_AUDIO_TIMEOUT_MS` (default 10 min). `cloudbuild.yaml` v1.6.1 com env de timeout e `--remove-secrets` legados.
+
+**Arquivos modificados:**
+- `backend/worker/audioProcessor.js` (v4.2.0)
+- `backend/worker/audioAutoRetrySweep.js` (v1.5.0)
+- `backend/config/vertexAI.js` (v2.1.0)
+- `cloudbuild.yaml` (v1.6.1)
+- `env.example` (v1.4.2)
+- `DEPLOY_LOG.md`
+
+**Impacto:**
+- Evita `auto-retry esgotado → failed` em áudio ainda em pipeline Gemini/GPT
+- Ligações longas não estouram timeout prematuro do Gemini
+
+---
+
+## GCP Deploy — infra cloudbuild v1.6 (2Gi/2CPU, min-instances 1, no-cpu-throttling) — 2026-06-05
+
+**Data/Hora:** 2026-06-05  
+**Tipo:** Deploy GCP Cloud Run  
+**Projeto:** velohub-471220  
+**Serviço:** worker-qualidade (us-east1)  
+**Commit:** 5e4cad9  
+
+### Descrição:
+Deploy manual via `gcloud builds submit` com `cloudbuild.yaml` v1.6 — trigger anterior só atualizava imagem (source deploy) sem aplicar flags de infra. Aplica: memory 2Gi, cpu 2, timeout 3600s, min-instances 1, no-cpu-throttling, max-instances 5, env vars do worker (Gemini ADC, heartbeat, GCS ready, sweep direct).
+
+**Arquivos no deploy:**
+- `cloudbuild.yaml` (v1.6.0)
+- `Dockerfile`
+- código worker commit 5e4cad9
+
+**Impacto:**
+- Worker permanece ativo com CPU alocada para sweep/Pub/Sub/Gemini sem observatório
+- Timeout adequado para pipeline Gemini+GPT em áudios longos
+
+**Resultado:**
+- Build `02bd57c2` (cloudbuild step deploy) falhou: `GCP_PROJECT_ID` era secret no serviço
+- Deploy manual em 2 passos: remoção secrets legados (`GCP_PROJECT_ID`, `GEMINI_API_KEY`, `GCP_SERVICE_ACCOUNT_KEY`) → revisão `00041-5c7`
+- Deploy infra completo → revisão **`worker-qualidade-00042-p7f`** (2Gi/2CPU, min-instances 1, no-cpu-throttling, timeout 3600s)
+- Imagem: `gcr.io/velohub-471220/audio-worker:5e4cad9`
+
+---
+
 ## GitHub Push — migração Gemini+GPT RAG, retry autônomo e porta local WORKER — 2026-06-03
 
 **Data/Hora:** 2026-06-03  

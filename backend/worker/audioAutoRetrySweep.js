@@ -1,4 +1,5 @@
-// VERSION: v1.4.0 | DATE: 2026-06-03 | AUTHOR: VeloHub Development Team
+// VERSION: v1.5.0 | DATE: 2026-06-05 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v1.5.0 - Estados processDirect: ok|skipped|in_flight|error; in_flight não republica; mutex no tick
 // CHANGELOG: v1.4.0 - Uma ação de retry/sweep por tick (fila serial no audioProcessor)
 // CHANGELOG: v1.3.0 - tick retorna pendentes; backlog imediato (audioSent+pending); sinal onPendingWork
 // CHANGELOG: v1.2.0 - processamento direto no sweep (sem depender do pull Pub/Sub); getSweepTick para /worker/reconcile
@@ -18,6 +19,7 @@ const SWEEP_DIRECT_PROCESS = process.env.SWEEP_DIRECT_PROCESS !== 'false';
 const BACKLOG_IMMEDIATE = process.env.BACKLOG_IMMEDIATE !== 'false';
 
 let activeSweepTick = null;
+let sweepTickInFlight = false;
 
 function isDone(t) {
   return t === true || t === 'done';
@@ -83,6 +85,18 @@ function startAutoRetrySweep(deps) {
   const { addLog, recordQueue, getPubSub, bucketName, processDirect, onPendingWork } = deps;
 
   const tick = async () => {
+    if (sweepTickInFlight) {
+      return 0;
+    }
+    sweepTickInFlight = true;
+    try {
+      return await runSweepTickBody();
+    } finally {
+      sweepTickInFlight = false;
+    }
+  };
+
+  const runSweepTickBody = async () => {
     const pubsub = getPubSub();
     if (!pubsub) {
       return 0;
@@ -170,9 +184,9 @@ function startAutoRetrySweep(deps) {
 
       if (SWEEP_DIRECT_PROCESS && typeof processDirect === 'function') {
         try {
-          const handled = await processDirect(doc);
+          const directResult = await processDirect(doc);
           actedThisTick = true;
-          if (handled) {
+          if (directResult === 'ok' || directResult === 'skipped') {
             recordQueue({
               ts: new Date().toISOString(),
               avaliacaoId: String(doc._id),
@@ -183,6 +197,18 @@ function startAutoRetrySweep(deps) {
             pendingLeft--;
             continue;
           }
+          if (directResult === 'in_flight') {
+            recordQueue({
+              ts: new Date().toISOString(),
+              avaliacaoId: String(doc._id),
+              fileName: doc.nomeArquivoAudio,
+              mode: 'in_flight',
+              attempt: attempts,
+              label: 'processamento em andamento — aguardando'
+            });
+            continue;
+          }
+          addLog('WARN', `sweep direct sem sucesso (${directResult}) ${doc.nomeArquivoAudio}, republicando`);
         } catch (e) {
           actedThisTick = true;
           addLog('WARN', `sweep direct falhou ${doc.nomeArquivoAudio}, republicando: ${e.message}`);

@@ -1,12 +1,29 @@
-// VERSION: v2.0.0 | DATE: 2026-06-03 | AUTHOR: VeloHub Development Team
+// VERSION: v2.1.0 | DATE: 2026-06-05 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v2.1.0 - Timeout configurável GEMINI_AUDIO_TIMEOUT_MS (default 10 min) para ligações longas
 // CHANGELOG: v2.0.0 - Gemini Enterprise @google/genai ADC; transcricao+analiseDialogo via gs://; remove Speech/Vertex SDK legado
 const { GoogleGenAI } = require('@google/genai');
 
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID;
 const GOOGLE_CLOUD_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || process.env.GCP_LOCATION || 'global';
 const GEMINI_MODEL_ID = process.env.GEMINI_MODEL_ID || 'gemini-3.5-flash';
+const GEMINI_AUDIO_TIMEOUT_MS = parseInt(process.env.GEMINI_AUDIO_TIMEOUT_MS || '600000', 10);
 
 let genAIClient;
+
+const withTimeout = async (promise, ms, label) => {
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} excedeu timeout de ${Math.round(ms / 1000)}s`)),
+      ms
+    );
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
 
 const GEMINI_AGENT_PROMPT = `Gere uma transcrição do áudio. Extraia apenas a fala e ignore os ruídos ambientes. O arquivo de áudio fornecido contém uma ligação telefônica ocorrida em nosso call center de atendimento ao cliente do Velotax. Eu preciso da transcrição dessa ligação em forma de diálogo, com agente de atendimento e cliente identificados. A conversa acontece em portugues do Brasil e deve ser mantida dessa forma. Palavrões, insultos, gírias e outros desvios da forma educada ou esperada de relacionamento deverão ser conservados e transcritos sem censura ou substituição para que haja conhecimento desses desvios em suas ocorrências. A transcrição deve se manter extremamente fiel ao diálogo ocorrido.
 
@@ -140,25 +157,29 @@ const runGeminiAudioAnalysis = async (gcsUri, fileName) => {
 
   console.log(`🎵 Gemini: analisando áudio ${gcsUri} (${mimeType})`);
 
-  const response = await genAIClient.models.generateContent({
-    model: GEMINI_MODEL_ID,
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          { text: GEMINI_AGENT_PROMPT },
-          { fileData: { fileUri: gcsUri, mimeType } }
-        ]
+  const response = await withTimeout(
+    genAIClient.models.generateContent({
+      model: GEMINI_MODEL_ID,
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: GEMINI_AGENT_PROMPT },
+            { fileData: { fileUri: gcsUri, mimeType } }
+          ]
+        }
+      ],
+      config: {
+        maxOutputTokens: 65535,
+        temperature: 1,
+        topP: 0.95,
+        responseMimeType: 'application/json',
+        responseSchema: GEMINI_RESPONSE_SCHEMA
       }
-    ],
-    config: {
-      maxOutputTokens: 65535,
-      temperature: 1,
-      topP: 0.95,
-      responseMimeType: 'application/json',
-      responseSchema: GEMINI_RESPONSE_SCHEMA
-    }
-  });
+    }),
+    GEMINI_AUDIO_TIMEOUT_MS,
+    'Gemini generateContent'
+  );
 
   const text = response.text;
   const parsed = parseJsonFromModelText(text);
