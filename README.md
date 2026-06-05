@@ -1,81 +1,64 @@
-# ⚙️ Worker de Processamento de Áudio - VeloHub
+# Worker de Processamento de Áudio — VeloHub
 
-<!-- VERSION: v1.0.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team -->
+<!-- VERSION: v1.1.0 | DATE: 2026-06-03 | AUTHOR: VeloHub Development Team -->
+<!-- CHANGELOG: v1.1.0 - Gemini Enterprise + GPT RAG; schema LISTA audio_analise_results -->
 
-Worker assíncrono para processamento de análise de qualidade de áudio usando Vertex AI (Speech-to-Text + Gemini).
+Worker assíncrono para análise de qualidade de áudio em ligações do call center Velotax.
 
-## 📋 Descrição
+## Descrição
 
-Este worker escuta mensagens do Pub/Sub quando arquivos de áudio são enviados para o GCS, processa os áudios usando Vertex AI e salva os resultados no MongoDB.
+O worker escuta o Pub/Sub quando áudios chegam ao GCS, processa cada ligação com dois agentes de IA e persiste o resultado em `console_analises.audio_analise_results` (formato LISTA).
 
-## 🏗️ Arquitetura
+## Arquitetura
 
-- **Pub/Sub**: Recebe notificações quando arquivos são enviados ao GCS
-- **Vertex AI Speech-to-Text**: Transcreve áudio com timestamps
-- **Gemini AI**: Analisa emoção, nuance e qualidade do atendimento
-- **MongoDB**: Armazena resultados da análise
-- **Cloud Run**: Hospeda o worker como serviço serverless
+| Etapa | Agente | Saída |
+|-------|--------|--------|
+| 1 | **Gemini 3.5 Flash** (ADC, `@google/genai`, áudio `gs://`) | `transcricao[]`, `analiseDialogo` |
+| 2 | **GPT + RAG** (OpenAI Responses, 2 vector stores) | `criteriosDetalhados`, `palavrasCriticas`, `observacaoGPT` |
+| 3 | Worker | merge critérios manuais → `pontuacaoCalculada` → `avaliacaoIA` |
 
-## 📁 Estrutura
+- **Pub/Sub + GCS**: inalterados
+- **MongoDB**: `audio_analise_results` + `qualidade_avaliacoes`
+- **Cloud Run**: serviço `worker-qualidade`
+
+## Estrutura
 
 ```
 worker-qualidade/
 ├── backend/
 │   ├── worker/
-│   │   └── audioProcessor.js    # Worker principal
+│   │   ├── audioProcessor.js
+│   │   ├── healthCheck.js
+│   │   └── observatorio.js
 │   ├── config/
-│   │   └── vertexAI.js          # Configuração Vertex AI
+│   │   ├── vertexAI.js      # Gemini Enterprise
+│   │   └── openAIGPT.js     # GPT + file_search
 │   └── models/
-│       ├── AudioAnaliseStatus.js
-│       └── AudioAnaliseResult.js
-├── scripts/
-│   └── setup-gcs-notification.ps1
+│       ├── AudioAnaliseResult.js
+│       └── QualidadeAvaliacao.js
 ├── Dockerfile
 ├── cloudbuild.yaml
-├── package.json
-└── env.example
+├── env.example
+└── package.json
 ```
 
-## 🚀 Deploy
+## Configuração
 
-### Pré-requisitos
+Variáveis em `env.example`. Produção: ADC para Gemini (sem `GEMINI_API_KEY` no container); `OPENAI_API_KEY` e `MONGO_ENV` via Secret Manager no Cloud Run.
 
-1. Google Cloud Project configurado
-2. Pub/Sub topic e subscription criados
-3. GCS bucket configurado com notificação para Pub/Sub
-4. Service Account com permissões adequadas
+## Fluxo
 
-### Deploy via Cloud Build
+1. Áudio no GCS → Pub/Sub
+2. Gemini: transcrição em diálogo + análise vocal (foco no agente)
+3. GPT: auditoria técnica com bases pública e interna (RAG)
+4. Worker copia critérios manuais da avaliação e calcula pontuação
+5. Grava documento LISTA e atualiza `avaliacaoIA` / `audioTreated=done`
+6. Notifica backend Skynet (SSE)
+
+## Deploy
 
 ```bash
 gcloud builds submit --config=cloudbuild.yaml
 ```
 
-## 🔧 Configuração
-
-Copie `env.example` para `.env` e configure as variáveis:
-
-- `MONGODB_URI`: URI de conexão MongoDB
-- `GCP_PROJECT_ID`: ID do projeto GCP
-- `GCS_BUCKET_NAME`: Nome do bucket GCS
-- `PUBSUB_SUBSCRIPTION_NAME`: Nome da subscription Pub/Sub
-- `GEMINI_API_KEY`: Chave da API Gemini
-- `BACKEND_API_URL`: URL do backend API para notificações
-
-## 📝 Fluxo de Processamento
-
-1. Arquivo enviado ao GCS → Notificação Pub/Sub
-2. Worker recebe mensagem do Pub/Sub
-3. Worker busca registro no MongoDB
-4. Worker transcreve áudio (Speech-to-Text)
-5. Worker analisa emoção/nuance (Gemini)
-6. Worker cruza outputs e calcula qualidade
-7. Worker salva resultado no MongoDB
-8. Worker atualiza status (treated=true)
-9. Worker notifica backend API (dispara SSE)
-
-## 🔗 Links
-
-- **Repositório:** [https://github.com/admVeloHub/gcp-worker-qualidade](https://github.com/admVeloHub/gcp-worker-qualidade)
-- **Backend API:** [https://github.com/admVeloHub/Backend-GCP](https://github.com/admVeloHub/Backend-GCP)
-
+Repositório: [admVeloHub/gcp-worker-qualidade](https://github.com/admVeloHub/gcp-worker-qualidade)

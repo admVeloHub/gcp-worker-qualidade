@@ -1,4 +1,5 @@
-// VERSION: v1.3.0 | DATE: 2026-06-02 | AUTHOR: VeloHub Development Team
+// VERSION: v1.4.0 | DATE: 2026-06-03 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v1.4.0 - Uma ação de retry/sweep por tick (fila serial no audioProcessor)
 // CHANGELOG: v1.3.0 - tick retorna pendentes; backlog imediato (audioSent+pending); sinal onPendingWork
 // CHANGELOG: v1.2.0 - processamento direto no sweep (sem depender do pull Pub/Sub); getSweepTick para /worker/reconcile
 // CHANGELOG: v1.1.0 - tick imediato ao iniciar sweep (não espera 1º intervalo); execução autônoma do worker
@@ -111,7 +112,13 @@ function startAutoRetrySweep(deps) {
 
     let pendingLeft = 0;
 
+    let actedThisTick = false;
+
     for (const doc of candidates) {
+      if (actedThisTick) {
+        break;
+      }
+
       const t = doc.audioTreated;
       if (!isPendingLike(t)) continue;
 
@@ -164,6 +171,7 @@ function startAutoRetrySweep(deps) {
       if (SWEEP_DIRECT_PROCESS && typeof processDirect === 'function') {
         try {
           const handled = await processDirect(doc);
+          actedThisTick = true;
           if (handled) {
             recordQueue({
               ts: new Date().toISOString(),
@@ -176,12 +184,14 @@ function startAutoRetrySweep(deps) {
             continue;
           }
         } catch (e) {
+          actedThisTick = true;
           addLog('WARN', `sweep direct falhou ${doc.nomeArquivoAudio}, republicando: ${e.message}`);
         }
       }
 
       try {
         await publishAudioMessage(pubsub, doc.nomeArquivoAudio, bucketName);
+        actedThisTick = true;
         doc.audioAutoRepublishAttempts = attempts + 1;
         doc.audioLastAutoRepublishAt = new Date();
         doc.audioUpdatedAt = new Date();

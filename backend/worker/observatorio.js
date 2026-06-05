@@ -413,8 +413,8 @@ router.get('/observatorio', (req, res) => {
                     <span class="conn-label">Pub/Sub</span>
                 </div>
                 <div class="conn-item" role="listitem">
-                    <div class="status-indicator error" id="conn-led-vertex" title="…" aria-label="Vertex AI"></div>
-                    <span class="conn-label">Vertex AI</span>
+                    <div class="status-indicator error" id="conn-led-gemini" title="…" aria-label="Gemini Enterprise"></div>
+                    <span class="conn-label">Gemini</span>
                 </div>
             </div>
         </div>
@@ -494,7 +494,7 @@ router.get('/observatorio', (req, res) => {
                 if (health.components) {
                     applyConnLed('conn-led-mongodb', health.components.mongodb.status, 'MongoDB');
                     applyConnLed('conn-led-pubsub', health.components.pubsub.status, 'Pub/Sub');
-                    applyConnLed('conn-led-vertex', health.components.vertexAI.status, 'Vertex AI');
+                    applyConnLed('conn-led-gemini', health.components.gemini?.status, 'Gemini Enterprise');
                 }
                 
                 let data = { stats: {}, logs: [] };

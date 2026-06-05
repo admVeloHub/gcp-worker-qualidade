@@ -1,40 +1,87 @@
-// VERSION: v1.1.0 | DATE: 2025-11-24 | AUTHOR: VeloHub Development Team
+// VERSION: v2.0.0 | DATE: 2026-06-03 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v2.0.0 - OpenAI Responses API + file_search (2 VS); JSON LISTA criteriosDetalhados+palavrasCriticas+observacaoGPT
 const OpenAI = require('openai');
 const { getSecret } = require('./secrets');
 
-// Configuração
-const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID;
-const GPT_MODEL = process.env.GPT_MODEL || 'gpt-5-mini'; // Modelo padrão: gpt-5-mini
+const GPT_MODEL = process.env.GPT_MODEL || 'gpt-5-mini';
+const OPENAI_VECTOR_STORE_PUBLIC =
+  process.env.OPENAI_VECTOR_STORE_PUBLIC || 'vs_69fe281ef0f48191a5587521c18a18c1';
+const OPENAI_VECTOR_STORE_INTERNAL =
+  process.env.OPENAI_VECTOR_STORE_INTERNAL || 'vs_6a0b05c7fe34819186e4f6dab9f1bf56';
 
-// Cliente OpenAI
 let openaiClient = null;
 let openaiApiKey = null;
 
-/**
- * Inicializar cliente OpenAI
- */
+const GPT_AGENT_SYSTEM_PROMPT = `Você é o auditor técnico de qualidade de atendimento da Velotax. Sua função é avaliar exclusivamente o desempenho do AGENTE DE ATENDIMENTO em ligações de call center, com base na transcrição fornecida.
+
+Você NÃO avalia tom emocional, empatia percebida no áudio nem postura vocal — isso já foi analisado por outro sistema.
+
+Antes de concluir, use file_search nas bases anexadas:
+(1) Base pública — informações gerais do produto e orientações que podem ser repassadas ao cliente.
+(2) Base interna — instruções de trabalho e procedimentos operacionais corretos.
+
+Para cada afirmação do agente sobre produto, prazos, direitos, quitação, portabilidade, negociação ou procedimento, confronte com as bases. Se o agente contradisser a base pública, omitir passo obrigatório da base interna ou inventar informação, reflita em procedimentoIncorreto e/ou resolucaoQuestao conforme o caso.
+
+Seja objetivo. Não invente fatos que não estejam na transcrição nem nas bases recuperadas.`;
+
+const buildGptUserPrompt = (transcricaoTexto) => `TRANSCRIÇÃO DA LIGAÇÃO (fiel, diálogo Agente/Cliente):
+
+${transcricaoTexto}
+
+---
+
+TAREFA:
+1. Analise tecnicamente o atendimento do AGENTE usando file_search nas duas vector stores.
+2. Avalie: (a) correção e clareza das informações passadas; (b) alinhamento com a orientação pública disponível ao cliente; (c) respeito ao procedimento correto das instruções de trabalho.
+3. Preencha os critérios booleanos de qualidade e palavrasCriticas conforme as regras abaixo.
+4. NÃO avalie registroAtendimento, naoConsultouBot nem conformidadeTicket (serão definidos fora desta análise).
+
+CRITÉRIOS (true/false, apenas os verificáveis pela transcrição + bases):
+- saudacaoAdequada, escutaAtiva, clarezaObjetividade, resolucaoQuestao, dominioAssunto, empatiaCordialidade, direcionouPesquisa, procedimentoIncorreto, encerramentoBrusco
+(Regras de pontuação VeloHub aplicadas pelo worker após sua resposta — não calcule pontuacaoCalculada.)
+
+PALAVRAS CRÍTICAS (mesma política do worker legado):
+Busque na transcrição e liste em palavrasCriticas apenas o que for encontrado (array de strings; [] se nenhuma):
+- "procon" (ou "PROCON")
+- "bacen" (ou "BACEN" ou "Banco Central")
+- "processo" quando relacionado a processo judicial ou administrativo
+- "acionar na justiça", "entrar na justiça", "ir para a justiça", "processar", "processo judicial", "ação judicial", "advogado", "entrar com ação"
+- "denúncia", "denunciar", "fazer denúncia", "registrar denúncia"
+Inclua sinônimos equivalentes detectados. Não invente ocorrências.
+
+observacaoGPT: parecer técnico curto em 1 a 3 frases sobre conformidade da informação, base pública e procedimento interno. Objetivo e direto; sem repetir a transcrição.
+
+Responda exclusivamente em JSON válido:
+{
+  "criteriosDetalhados": {
+    "saudacaoAdequada": boolean,
+    "escutaAtiva": boolean,
+    "clarezaObjetividade": boolean,
+    "resolucaoQuestao": boolean,
+    "dominioAssunto": boolean,
+    "empatiaCordialidade": boolean,
+    "direcionouPesquisa": boolean,
+    "procedimentoIncorreto": boolean,
+    "encerramentoBrusco": boolean
+  },
+  "palavrasCriticas": [] ou ["termo1", "termo2"],
+  "observacaoGPT": "..."
+}
+Sem texto fora do JSON.`;
+
 const initializeOpenAI = async () => {
   try {
-
-    // Buscar OPENAI_API_KEY - verificar env var primeiro, depois Secret Manager
     if (!openaiApiKey) {
       if (process.env.OPENAI_API_KEY) {
         openaiApiKey = process.env.OPENAI_API_KEY;
         console.log('✅ OPENAI_API_KEY encontrada em variáveis de ambiente');
       } else {
-        try {
-          openaiApiKey = await getSecret('OPENAI_API_KEY');
-        } catch (error) {
-          throw new Error(`Falha ao buscar OPENAI_API_KEY do Secret Manager: ${error.message}`);
-        }
+        openaiApiKey = await getSecret('OPENAI_API_KEY');
       }
     }
 
-    // Inicializar OpenAI client
     if (!openaiClient && openaiApiKey) {
-      openaiClient = new OpenAI({
-        apiKey: openaiApiKey
-      });
+      openaiClient = new OpenAI({ apiKey: openaiApiKey });
     } else if (!openaiClient) {
       throw new Error('OPENAI_API_KEY deve estar configurada');
     }
@@ -47,144 +94,95 @@ const initializeOpenAI = async () => {
   }
 };
 
-/**
- * Analisar transcrição com GPT
- * @param {string} transcription - Texto transcrito
- * @param {object} geminiAnalysis - Resultado da análise do Gemini (opcional, para comparação)
- * @returns {Promise<object>} Resultado da análise GPT
- */
-const analyzeWithGPT = async (transcription, geminiAnalysis = null) => {
+const parseJsonFromModelText = (text) => {
+  if (!text || typeof text !== 'string') {
+    throw new Error('Resposta do GPT vazia');
+  }
+  const trimmed = text.trim();
   try {
-    if (!openaiClient) {
-      await initializeOpenAI();
-    }
-
-    const prompt = `
-Analise a seguinte transcrição de uma ligação de atendimento e forneça uma análise complementar seguindo os mesmos critérios de qualidade:
-
-TRANSCRIÇÃO:
-${transcription}
-
-${geminiAnalysis ? `
-ANÁLISE PREVIA (Gemini):
-Pontuação: ${geminiAnalysis.pontuacaoGPT || 0}
-Critérios: ${JSON.stringify(geminiAnalysis.criteriosGPT || {}, null, 2)}
-Palavras Críticas: ${geminiAnalysis.palavrasCriticas?.join(', ') || 'Nenhuma'}
-Análise: ${geminiAnalysis.analysis || 'Não disponível'}
-
-Por favor, valide ou complemente esta análise com sua própria avaliação. Se houver diferenças significativas, explique-as.
-` : ''}
-
-CRITÉRIOS DE QUALIDADE:
-Avalie cada critério abaixo como true ou false baseado na transcrição:
-
-- saudacaoAdequada: O colaborador cumprimentou adequadamente? (+5 pontos se true)
-- escutaAtiva: Demonstrou escuta ativa e fez perguntas relevantes? (+10 pontos se true)
-- clarezaObjetividade: Foi claro e objetivo na comunicação? (+10 pontos se true)
-- resolucaoQuestao: Resolveu a questão seguindo procedimentos? (+40 pontos se true)
-- empatiaCordialidade: Demonstrou empatia e cordialidade? (+10 pontos se true)
-- direcionouPesquisa: Direcionou para pesquisa de satisfação? (+10 pontos se true)
-- procedimentoIncorreto: Repassou informação incorreta? (-100 pontos se true)
-- encerramentoBrusco: Encerrou o contato de forma brusca ou derrubou a ligação? (-100 pontos se true)
-
-IMPORTANTE - CRITÉRIOS NÃO VERIFICÁVEIS PELA IA:
-Os seguintes critérios NÃO devem ser avaliados pela IA, pois serão copiados automaticamente da avaliação manual do avaliador humano:
-- registroAtendimento: Anotação interna não presente na transcrição do áudio
-- naoConsultouBot: Não é possível verificar pela transcrição se o bot foi consultado
-- conformidadeTicket: Erro de tabulação ou resposta incoerente não verificável apenas pela transcrição
-
-Estes critérios devem sempre ser false na resposta da IA e serão adicionados posteriormente copiando da avaliação manual.
-
-PONTUAÇÃO:
-Calcule a pontuação baseado apenas nos critérios verificáveis acima. A pontuação pode variar de -200 a 85 pontos (sem incluir os critérios não verificáveis).
-
-PALAVRAS-CHAVE CRÍTICAS:
-Você DEVE buscar especificamente pelas seguintes palavras ou frases na transcrição:
-- "procon" (ou "PROCON")
-- "bacen" (ou "BACEN" ou "Banco Central")
-- "processo" (quando relacionado a processo judicial ou administrativo)
-- "acionar na justiça" (ou variações como "processar", "entrar na justiça", "acionar judicialmente")
-- "denuncia" (ou "denúncia", "denunciar")
-
-Sinônimos e variações também devem ser considerados:
-- "reclamação formal", "reclamação no PROCON", "reclamação no BACEN"
-- "processar", "processo judicial", "ação judicial"
-- "advogado", "entrar com ação", "ir para a justiça"
-- "denunciar", "fazer denúncia", "registrar denúncia"
-
-IMPORTANTE: 
-- Se NENHUMA dessas palavras ou sinônimos for encontrada na transcrição, retorne um array vazio: []
-- Se encontrar alguma dessas palavras ou sinônimos, liste-as no array palavrasCriticas
-- Não invente palavras críticas que não estejam relacionadas a reclamações formais ou processos legais
-
-Retorne um JSON com a seguinte estrutura:
-{
-  "analiseGPT": "Análise detalhada do atendimento",
-  "criteriosGPT": {
-    "saudacaoAdequada": boolean,
-    "escutaAtiva": boolean,
-    "clarezaObjetividade": boolean,
-    "resolucaoQuestao": boolean,
-    "empatiaCordialidade": boolean,
-    "direcionouPesquisa": boolean,
-    "procedimentoIncorreto": boolean,
-    "encerramentoBrusco": boolean
-  },
-  "pontuacaoGPT": number,
-  "palavrasCriticas": [] ou ["palavra1", "palavra2"],
-  "recomendacoes": ["recomendação1", "recomendação2"],
-  "confianca": number,
-  "validacaoGemini": ${geminiAnalysis ? '{"concorda": boolean, "diferencas": ["diferença1", "diferença2"]}' : 'null'}
-}
-
-NOTA: Os critérios registroAtendimento, naoConsultouBot e conformidadeTicket NÃO devem estar em criteriosGPT, pois serão adicionados posteriormente copiando da avaliação manual.
-`;
-
-    const response = await openaiClient.chat.completions.create({
-      model: GPT_MODEL, // Usa variável de ambiente ou padrão 'gpt-5-mini'
-      messages: [
-        {
-          role: 'system',
-          content: 'Você é um especialista em análise de qualidade de atendimento ao cliente. Analise transcrições de forma objetiva e detalhada, seguindo rigorosamente os critérios de pontuação especificados.'
-        },
-        {
-          role: 'user',
-          content: prompt
-        }
-      ],
-      temperature: 0.3, // Baixa temperatura para respostas mais consistentes
-      response_format: { type: 'json_object' } // Forçar resposta JSON
-    });
-
-    const analysisText = response.choices[0].message.content;
-    
-    // Extrair JSON da resposta (pode ter texto antes/depois)
-    const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
+    return JSON.parse(trimmed);
+  } catch (_e) {
+    const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       throw new Error('Resposta do GPT não contém JSON válido');
     }
-
-    const analysis = JSON.parse(jsonMatch[0]);
-
-    console.log('✅ Análise GPT concluída');
-    
-    return {
-      analysis: analysis.analiseGPT || '',
-      criteriosGPT: analysis.criteriosGPT || {},
-      pontuacaoGPT: analysis.pontuacaoGPT || 0,
-      palavrasCriticas: analysis.palavrasCriticas || [],
-      recomendacoes: analysis.recomendacoes || [],
-      confianca: analysis.confianca || 0,
-      validacaoGemini: analysis.validacaoGemini || null
-    };
-  } catch (error) {
-    console.error('❌ Erro ao analisar com GPT:', error);
-    throw error;
+    return JSON.parse(jsonMatch[0]);
   }
+};
+
+const extractResponseText = (response) => {
+  if (response.output_text) {
+    return response.output_text;
+  }
+  if (Array.isArray(response.output)) {
+    const parts = [];
+    for (const item of response.output) {
+      if (item.type === 'message' && Array.isArray(item.content)) {
+        for (const block of item.content) {
+          if (block.type === 'output_text' && block.text) {
+            parts.push(block.text);
+          }
+        }
+      }
+    }
+    if (parts.length > 0) {
+      return parts.join('\n');
+    }
+  }
+  throw new Error('Não foi possível extrair texto da resposta OpenAI');
+};
+
+/**
+ * Auditoria técnica com RAG (transcrição em texto)
+ * @param {string} transcricaoTexto
+ * @returns {Promise<{criteriosDetalhados: object, palavrasCriticas: string[], observacaoGPT: string}>}
+ */
+const analyzeWithGPT = async (transcricaoTexto) => {
+  if (!openaiClient) {
+    await initializeOpenAI();
+  }
+
+  if (!transcricaoTexto || transcricaoTexto.trim().length === 0) {
+    throw new Error('Transcrição vazia para análise GPT');
+  }
+
+  const userPrompt = buildGptUserPrompt(transcricaoTexto);
+
+  const response = await openaiClient.responses.create({
+    model: GPT_MODEL,
+    instructions: GPT_AGENT_SYSTEM_PROMPT,
+    input: userPrompt,
+    tools: [
+      {
+        type: 'file_search',
+        vector_store_ids: [OPENAI_VECTOR_STORE_PUBLIC, OPENAI_VECTOR_STORE_INTERNAL]
+      }
+    ],
+    text: {
+      format: { type: 'json_object' }
+    }
+  });
+
+  const analysisText = extractResponseText(response);
+  const analysis = parseJsonFromModelText(analysisText);
+
+  const criteriosDetalhados = analysis.criteriosDetalhados || {};
+  const palavrasCriticas = Array.isArray(analysis.palavrasCriticas) ? analysis.palavrasCriticas : [];
+  const observacaoGPT =
+    typeof analysis.observacaoGPT === 'string' ? analysis.observacaoGPT.trim() : '';
+
+  console.log('✅ Análise GPT (RAG) concluída');
+
+  return {
+    criteriosDetalhados,
+    palavrasCriticas,
+    observacaoGPT
+  };
 };
 
 module.exports = {
   initializeOpenAI,
-  analyzeWithGPT
+  analyzeWithGPT,
+  buildGptUserPrompt,
+  GPT_AGENT_SYSTEM_PROMPT
 };
-

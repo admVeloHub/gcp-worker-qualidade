@@ -1,4 +1,7 @@
-// VERSION: v3.9.0 | DATE: 2026-06-02 | AUTHOR: VeloHub Development Team
+// VERSION: v4.1.1 | DATE: 2026-06-03 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v4.1.1 - Porta local via WORKER da FONTE DA VERDADE (.env); Cloud Run continua PORT=8080
+// CHANGELOG: v4.1.0 - Heartbeat interno; fila serial; espera GCS; mongo/sweep autonomos; erros recuperaveis por padrao
+// CHANGELOG: v4.0.0 - Pipeline Gemini transcricao+analiseDialogo; GPT RAG obrigatorio; persistencia LISTA audio_analise_results
 // CHANGELOG: v3.9.0 - Loop interno de fila ativa até zerar pendentes; drenagem backlog no arranque; sem depender de HTTP/observatório
 // CHANGELOG: v3.8.0 - processAudioByFileName + sweep direct; deploy worker-qualidade; /worker/reconcile; Pub/Sub flowControl
 // CHANGELOG: v3.7.4 - Auto-retry sweep autônomo: arranque robusto (race Mongo/PubSub); log explícito de dependências
@@ -15,7 +18,8 @@
 require('../config/loadFonteVerdadeEnv').loadFrom(__dirname);
 
 const express = require('express');
-const PORT = process.env.PORT || 8080;
+const { resolveWorkerHttpPort } = require('../config/workerPort');
+const PORT = resolveWorkerHttpPort();
 
 // Criar servidor Express básico IMEDIATAMENTE
 const basicApp = express();
@@ -32,7 +36,7 @@ basicApp.get('/', (req, res) => {
 
 // Variáveis para módulos (serão carregados depois que servidor estiver pronto)
 let PubSub, axios, AudioAnaliseStatus, AudioAnaliseResult, QualidadeAvaliacao;
-let initializeVertexAI, transcribeAudio, analyzeEmotionAndNuance, crossReferenceOutputs, retryWithExponentialBackoff;
+let initializeVertexAI, runGeminiAudioAnalysis, formatTranscricaoParaTexto, retryWithExponentialBackoff;
 let analyzeWithGPT, healthCheckRouter, observatorioRouter, registerWorkerInstances;
 
 // Iniciar servidor básico IMEDIATAMENTE (antes de qualquer outra coisa)
@@ -86,9 +90,8 @@ function loadWorkerModules() {
     // Importar configurações Vertex AI
     const vertexAI = require('../config/vertexAI');
     initializeVertexAI = vertexAI.initializeVertexAI;
-    transcribeAudio = vertexAI.transcribeAudio;
-    analyzeEmotionAndNuance = vertexAI.analyzeEmotionAndNuance;
-    crossReferenceOutputs = vertexAI.crossReferenceOutputs;
+    runGeminiAudioAnalysis = vertexAI.runGeminiAudioAnalysis;
+    formatTranscricaoParaTexto = vertexAI.formatTranscricaoParaTexto;
     retryWithExponentialBackoff = vertexAI.retryWithExponentialBackoff;
     
     // Importar OpenAI GPT
@@ -125,15 +128,16 @@ const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3', 10);
 /** Origem do Skynet (sem /api). Cloud Run: definir BACKEND_API_URL nas variáveis do serviço worker. */
 const BACKEND_API_URL = process.env.BACKEND_API_URL || 'http://localhost:3001';
 const { startAutoRetrySweep, getSweepTick } = require('./audioAutoRetrySweep');
-// Só envia para GPT/OpenAI quando ENABLE_GPT_ANALYSIS=true explicitamente (default: não enviar)
-const ENABLE_GPT_ANALYSIS = process.env.ENABLE_GPT_ANALYSIS === 'true';
+const { waitForGcsObjectReady } = require('../config/gcsStorage');
+
+const WORKER_HEARTBEAT_MS = parseInt(process.env.WORKER_HEARTBEAT_MS || '30000', 10);
+const TASK_GAP_MS = parseInt(process.env.TASK_GAP_MS || '1000', 10);
 
 // Inicializar Pub/Sub
 let pubsub;
 let subscription;
 
 // Instâncias para health check
-let speechClientInstance = null;
 let genAIInstance = null;
 
 // Contador de tentativas por mensagem
@@ -161,6 +165,76 @@ const PENDING_WORK_ACTIVE_MS = parseInt(process.env.PENDING_WORK_ACTIVE_MS || '1
 const BACKLOG_DRAIN_MAX_ROUNDS = parseInt(process.env.BACKLOG_DRAIN_MAX_ROUNDS || '500', 10);
 let pendingWorkInterval = null;
 let backlogDrainRunning = false;
+let heartbeatInterval = null;
+let mongoInitInFlight = null;
+let serialTail = Promise.resolve();
+
+/** Uma tarefa de áudio por vez; intervalo entre conclusões. */
+const enqueueSerialTask = (taskFn, label = 'task') => {
+  const job = serialTail.then(async () => {
+    addLog('DEBUG', `🔒 Fila serial: ${label}`);
+    try {
+      return await taskFn();
+    } finally {
+      if (TASK_GAP_MS > 0) {
+        await new Promise((resolve) => setTimeout(resolve, TASK_GAP_MS));
+      }
+    }
+  });
+  serialTail = job.catch(() => {});
+  return job;
+};
+
+const ensureMongoReady = async () => {
+  if (mongoSucceeded) {
+    return true;
+  }
+  if (mongoInitInFlight) {
+    return mongoInitInFlight;
+  }
+  mongoInitInFlight = (async () => {
+    try {
+      await AudioAnaliseStatus.initializeConnection();
+      await AudioAnaliseResult.initializeConnection();
+      await QualidadeAvaliacao.initializeConnection();
+      mongoSucceeded = true;
+      sweepWaitLogged = false;
+      addLog('INFO', '✅ MongoDB pronto (ensureMongoReady)');
+      tryStartAutoRetrySweep();
+      return true;
+    } catch (error) {
+      addLog('WARN', `ensureMongoReady: ${error.message}`);
+      return false;
+    } finally {
+      mongoInitInFlight = null;
+    }
+  })();
+  return mongoInitInFlight;
+};
+
+const runWorkerHeartbeatTick = async () => {
+  await ensureMongoReady();
+  tryStartAutoRetrySweep();
+  const pending = await countMongoPendingAudio();
+  if (pending > 0 || hasInFlightProcessing()) {
+    await runQueueReconcileCycle();
+    ensurePendingWorkLoop();
+  }
+};
+
+const startWorkerHeartbeat = () => {
+  if (heartbeatInterval) {
+    return;
+  }
+  addLog(
+    'INFO',
+    `💓 Heartbeat interno a cada ${WORKER_HEARTBEAT_MS / 1000}s (mongo + sweep + fila — sem observatório)`
+  );
+  heartbeatInterval = setInterval(() => {
+    runWorkerHeartbeatTick().catch((e) => addLog('ERROR', `heartbeat: ${e.message}`));
+  }, WORKER_HEARTBEAT_MS);
+  runWorkerHeartbeatTick().catch((e) => addLog('ERROR', `heartbeat inicial: ${e.message}`));
+};
 
 const pushAutoRetryQueue = (entry) => {
   const id = entry.avaliacaoId;
@@ -244,7 +318,7 @@ const ensurePendingWorkLoop = () => {
 };
 
 const drainBacklogOnReady = async () => {
-  if (backlogDrainRunning || !mongoSucceeded || !speechClientInstance || !genAIInstance) {
+  if (backlogDrainRunning || !mongoSucceeded || !genAIInstance) {
     return;
   }
   backlogDrainRunning = true;
@@ -284,19 +358,23 @@ const isFileCurrentlyProcessing = (fileName) => {
  * @returns {Promise<boolean>} true se concluiu ou já estava tratado
  */
 const processPendingDocDirect = async (doc) => {
-  if (!speechClientInstance || !genAIInstance) {
-    return false;
-  }
   const fileName = doc.nomeArquivoAudio;
   if (!fileName || isFileCurrentlyProcessing(fileName)) {
     return false;
   }
-  const messageId = `sweep-${doc._id}-${Date.now()}`;
+  await ensureMongoReady();
+  if (!genAIInstance) {
+    return false;
+  }
   try {
-    const outcome = await processAudioByFileName(fileName, GCS_BUCKET_NAME, {
-      messageId,
-      source: 'sweep'
-    });
+    const outcome = await enqueueSerialTask(
+      () =>
+        processAudioByFileName(fileName, GCS_BUCKET_NAME, {
+          messageId: `sweep-${doc._id}-${Date.now()}`,
+          source: 'sweep'
+        }),
+      `sweep:${fileName}`
+    );
     return outcome === 'ok' || outcome === 'skipped';
   } catch (e) {
     addLog('ERROR', `sweep direct ${fileName}: ${e.message}`);
@@ -341,7 +419,7 @@ const initializePubSub = () => {
     subscription = pubsub.subscription(PUBSUB_SUBSCRIPTION_NAME);
     subscription.setOptions({
       flowControl: {
-        maxMessages: 5,
+        maxMessages: 1,
         allowExcessMessages: false
       }
     });
@@ -370,36 +448,15 @@ const isRecoverableError = (error) => {
     'avaliação não encontrada',
     'arquivo deve estar associado',
     'já foi processado',
-    'validation error',
-    'invalid data'
+    'nome do arquivo não encontrado na mensagem'
   ];
-  
-  if (nonRecoverablePatterns.some(pattern => errorMessage.includes(pattern))) {
+
+  if (nonRecoverablePatterns.some((pattern) => errorMessage.includes(pattern))) {
     return false;
   }
-  
-  // Erros recuperáveis - podem ser retentados (nack / nova entrega Pub/Sub)
-  const recoverablePatterns = [
-    'network',
-    'timeout',
-    'connection',
-    'temporary',
-    'service unavailable',
-    'unavailable',
-    'econnreset',
-    'etimedout',
-    'socket',
-    'deadline',
-    'ssl',
-    'tls',
-    'openssl',
-    'internal error',
-    'try again',
-    'resource exhausted',
-    'too many requests'
-  ];
-  
-  return recoverablePatterns.some(pattern => errorMessage.includes(pattern));
+
+  // Demais falhas (transcrição vazia, GCS ainda não pronto, Gemini/GPT, rede) → nack / sweep retenta
+  return true;
 };
 
 /**
@@ -431,61 +488,42 @@ const notifyBackendCompletion = async (avaliacaoId) => {
  */
 const processAudio = async (gcsUri, fileName) => {
   const startTime = Date.now();
-  
+
   try {
     addLog('INFO', `🎵 Iniciando processamento de áudio: ${fileName}`);
-    
-    // 1. Transcrever áudio com retry
-    addLog('INFO', '📝 Passo 1: Transcrevendo áudio...');
-    const transcriptionResult = await retryWithExponentialBackoff(
-      () => transcribeAudio(gcsUri, fileName, 'pt-BR'),
+
+    addLog('INFO', '📝 Passo 1: Gemini — transcrição e analiseDialogo...');
+    const geminiResult = await retryWithExponentialBackoff(
+      () => runGeminiAudioAnalysis(gcsUri, fileName),
       MAX_RETRIES
     );
-    
-    if (!transcriptionResult.transcription || transcriptionResult.transcription.length === 0) {
-      throw new Error('Transcrição vazia ou inválida');
+
+    addLog('INFO', `✅ Gemini concluído: ${geminiResult.transcricao.length} turnos`);
+
+    const transcricaoTexto = formatTranscricaoParaTexto(geminiResult.transcricao);
+    if (!transcricaoTexto || transcricaoTexto.trim().length === 0) {
+      throw new Error('Transcrição vazia após formatação');
     }
-    
-    addLog('INFO', `✅ Transcrição concluída: ${transcriptionResult.transcription.length} caracteres`);
-    
-    // 2. Analisar emoção e nuance com retry (Gemini)
-    addLog('INFO', '🧠 Passo 2: Analisando emoção e nuance com Gemini...');
-    const emotionResult = await retryWithExponentialBackoff(
-      () => analyzeEmotionAndNuance(transcriptionResult.transcription, transcriptionResult.timestamps),
+
+    addLog('INFO', '🤖 Passo 2: GPT — auditoria técnica com RAG...');
+    const gptResult = await retryWithExponentialBackoff(
+      () => analyzeWithGPT(transcricaoTexto),
       MAX_RETRIES
     );
-    
-    addLog('INFO', `✅ Análise Gemini concluída. Pontuação: ${emotionResult.pontuacaoGPT}`);
-    
-    // 3. Analisar com GPT (opcional)
-    let gptResult = null;
-    if (ENABLE_GPT_ANALYSIS) {
-      try {
-        addLog('INFO', '🤖 Passo 3: Analisando com GPT...');
-        gptResult = await retryWithExponentialBackoff(
-          () => analyzeWithGPT(transcriptionResult.transcription, emotionResult),
-          MAX_RETRIES
-        );
-        addLog('INFO', `✅ Análise GPT concluída. Pontuação: ${gptResult.pontuacaoGPT}`);
-      } catch (error) {
-        addLog('WARN', `⚠️  Análise GPT falhou (continuando com Gemini apenas): ${error.message}`);
-        // Não bloquear processamento se GPT falhar
-        gptResult = null;
-      }
-    } else {
-      addLog('INFO', '⏭️  Análise GPT desabilitada (defina ENABLE_GPT_ANALYSIS=true para ativar)');
-    }
-    
-    // 4. Cruzar outputs (Gemini + GPT se disponível)
-    addLog('INFO', '🔗 Passo 4: Cruzando outputs...');
-    const crossReferenced = crossReferenceOutputs(transcriptionResult, emotionResult, gptResult);
-    
+
+    addLog('INFO', '✅ Análise GPT (RAG) concluída');
+
     const processingTime = (Date.now() - startTime) / 1000;
-    crossReferenced.processingTime = processingTime;
-    
     addLog('INFO', `✅ Processamento completo em ${processingTime.toFixed(2)}s`);
-    
-    return crossReferenced;
+
+    return {
+      transcricao: geminiResult.transcricao,
+      analiseDialogo: geminiResult.analiseDialogo,
+      criteriosDetalhados: gptResult.criteriosDetalhados,
+      palavrasCriticas: gptResult.palavrasCriticas,
+      observacaoGPT: gptResult.observacaoGPT,
+      processingTime
+    };
   } catch (error) {
     addLog('ERROR', `❌ Erro ao processar áudio: ${error.message}`);
     throw error;
@@ -503,6 +541,15 @@ const processAudioByFileName = async (fileName, bucketName, { messageId, source 
   addLog('INFO', `🔄 Processando arquivo (${source}): ${fileName}`);
   addLog('DEBUG', `📍 GCS URI: ${gcsUri}`);
 
+  await ensureMongoReady();
+  if (!genAIInstance) {
+    throw new Error('Gemini ainda não inicializado — aguarde e tente novamente');
+  }
+
+  addLog('INFO', `⏳ Aguardando objeto GCS estar pronto: ${fileName}`);
+  const gcsReady = await waitForGcsObjectReady(bucketName, fileName);
+  addLog('INFO', `✅ GCS pronto (${gcsReady.size} bytes, tentativa ${gcsReady.attempt})`);
+
   stats.processingMessages.set(jobId, {
     fileName,
     startTime: Date.now()
@@ -512,7 +559,7 @@ const processAudioByFileName = async (fileName, bucketName, { messageId, source 
 
   try {
     const ResultModel = await AudioAnaliseResult.model();
-    const existingResult = await ResultModel.findOne({ nomeArquivo: fileName });
+    const existingResult = await ResultModel.findOne({ nomeArquivoAudio: fileName });
 
     if (existingResult) {
       addLog('INFO', `ℹ️  Arquivo ${fileName} já foi processado anteriormente. Ignorando.`);
@@ -546,7 +593,9 @@ const processAudioByFileName = async (fileName, bucketName, { messageId, source 
 
     addLog('INFO', `✅ Avaliação encontrada: ${avaliacao._id} para arquivo: ${fileName}`);
 
+    const timestampInicio = new Date();
     const analysisResult = await processAudio(gcsUri, fileName);
+    const timestampFim = new Date();
 
     // Copiar critérios não verificáveis pela IA da avaliação manual
     // (A IA não pode determinar registroAtendimento, naoConsultouBot e conformidadeTicket)
@@ -591,55 +640,27 @@ const processAudioByFileName = async (fileName, bucketName, { messageId, source 
       return Math.max(0, total);
     };
     
-    // Copiar critérios não verificáveis e recalcular pontuação para qualityAnalysis (Gemini)
-    if (analysisResult.qualityAnalysis && analysisResult.qualityAnalysis.criterios) {
-      copiarCritériosNaoVerificaveis(analysisResult.qualityAnalysis.criterios);
-      analysisResult.qualityAnalysis.pontuacao = calcularPontuacao(analysisResult.qualityAnalysis.criterios);
-    }
-    
-    // Copiar critérios não verificáveis e recalcular pontuação para gptAnalysis se existir
-    if (analysisResult.gptAnalysis && analysisResult.gptAnalysis.criterios) {
-      copiarCritériosNaoVerificaveis(analysisResult.gptAnalysis.criterios);
-      analysisResult.gptAnalysis.pontuacao = calcularPontuacao(analysisResult.gptAnalysis.criterios);
-    }
-    
-    // Recalcular pontuação consensual se necessário
-    if (analysisResult.pontuacaoConsensual !== undefined) {
-      const pontuacaoGemini = analysisResult.qualityAnalysis?.pontuacao || 0;
-      const pontuacaoGPT = analysisResult.gptAnalysis?.pontuacao || pontuacaoGemini;
-      analysisResult.pontuacaoConsensual = Math.round((pontuacaoGemini + pontuacaoGPT) / 2);
-    }
+    const criteriosDetalhados = { ...analysisResult.criteriosDetalhados };
+    copiarCritériosNaoVerificaveis(criteriosDetalhados);
+    const pontuacaoCalculada = calcularPontuacao(criteriosDetalhados);
 
-    // Salvar resultado no MongoDB (reutilizar ResultModel já declarado acima)
     const audioResult = new ResultModel({
-      avaliacaoMonitorId: avaliacao._id,
-      nomeArquivo: fileName,
-      gcsUri: gcsUri,
-      transcription: analysisResult.transcription,
-      timestamps: analysisResult.timestamps,
-      emotion: analysisResult.emotion,
-      nuance: analysisResult.nuance,
-      qualityAnalysis: {
-        criterios: analysisResult.qualityAnalysis.criterios,
-        pontuacao: analysisResult.qualityAnalysis.pontuacao,
-        confianca: analysisResult.qualityAnalysis.confianca,
-        palavrasCriticas: analysisResult.qualityAnalysis.palavrasCriticas,
-        calculoDetalhado: analysisResult.qualityAnalysis.calculoDetalhado,
-        analysis: analysisResult.analysis
-      },
-      gptAnalysis: analysisResult.gptAnalysis || null,
-      pontuacaoConsensual: analysisResult.pontuacaoConsensual || analysisResult.qualityAnalysis.pontuacao,
-      processingTime: analysisResult.processingTime
+      avaliacao_id: avaliacao._id,
+      nomeArquivoAudio: fileName,
+      transcricao: analysisResult.transcricao,
+      analiseDialogo: analysisResult.analiseDialogo,
+      criteriosDetalhados,
+      pontuacaoCalculada,
+      palavrasCriticas: analysisResult.palavrasCriticas || [],
+      observacaoGPT: analysisResult.observacaoGPT || '',
+      timestampInicio,
+      timestampFim
     });
 
     await audioResult.save();
     addLog('INFO', `✅ Resultado salvo no MongoDB: ${audioResult._id}`);
 
-    const rawNota =
-      audioResult.pontuacaoConsensual ??
-      audioResult.qualityAnalysis?.pontuacao ??
-      audioResult.gptAnalysis?.pontuacao;
-    const notaIA = rawNota != null ? Number(rawNota) : NaN;
+    const notaIA = pontuacaoCalculada != null ? Number(pontuacaoCalculada) : NaN;
     if (!Number.isNaN(notaIA)) {
       avaliacao.avaliacaoIA = notaIA;
     }
@@ -706,10 +727,14 @@ const processMessage = async (message) => {
       throw new Error('Nome do arquivo não encontrado na mensagem');
     }
 
-    const outcome = await processAudioByFileName(fileName, bucketName, {
-      messageId,
-      source: 'pubsub'
-    });
+    const outcome = await enqueueSerialTask(
+      () =>
+        processAudioByFileName(fileName, bucketName, {
+          messageId,
+          source: 'pubsub'
+        }),
+      `pubsub:${fileName}`
+    );
 
     message.ack();
     if (outcome === 'ok') {
@@ -805,20 +830,12 @@ const processMessage = async (message) => {
  * Inicializar MongoDB
  */
 const initializeMongoDB = async () => {
-  try {
-    addLog('INFO', '🔄 Inicializando conexão MongoDB...');
-    // AudioAnaliseStatus mantido apenas para compatibilidade durante migração
-    await AudioAnaliseStatus.initializeConnection();
-    await AudioAnaliseResult.initializeConnection();
-    await QualidadeAvaliacao.initializeConnection();
-    addLog('INFO', '✅ MongoDB inicializado com sucesso');
-    mongoSucceeded = true;
-    tryStartAutoRetrySweep();
-    return true;
-  } catch (error) {
-    addLog('ERROR', `❌ Erro ao inicializar MongoDB: ${error.message}`);
-    throw error;
+  addLog('INFO', '🔄 Inicializando conexão MongoDB...');
+  const ok = await ensureMongoReady();
+  if (!ok) {
+    addLog('ERROR', '❌ Erro ao inicializar MongoDB na primeira tentativa (heartbeat retentará)');
   }
+  return ok;
 };
 
 /**
@@ -943,23 +960,25 @@ const startWorker = async () => {
       // Não travar o servidor se Pub/Sub falhar
     }
     
-    // Vertex AI
-    initializeVertexAI().then(({ speechClient, genAI }) => {
-      speechClientInstance = speechClient;
+    const openAIGPT = require('../config/openAIGPT');
+    openAIGPT.initializeOpenAI().catch((error) => {
+      addLog('ERROR', `❌ Erro ao inicializar OpenAI: ${error.message}`);
+    });
+
+    // Gemini Enterprise (ADC)
+    initializeVertexAI().then(({ genAI }) => {
       genAIInstance = genAI;
-      addLog('INFO', '✅ Vertex AI inicializado com sucesso');
+      addLog('INFO', '✅ Gemini Enterprise inicializado com sucesso');
       tryStartAutoRetrySweep();
       drainBacklogOnReady().catch((e) => {
         addLog('ERROR', `drenagem backlog: ${e.message}`);
       });
 
-      // Registrar instâncias para health check quando tudo estiver pronto
-      if (subscription && speechClientInstance && genAIInstance) {
-        registerWorkerInstances(subscription, speechClientInstance, genAIInstance);
+      if (subscription && genAIInstance) {
+        registerWorkerInstances(subscription, genAIInstance);
       }
     }).catch(error => {
-      addLog('ERROR', `❌ Erro ao inicializar Vertex AI: ${error.message}`);
-      // Não travar o servidor se Vertex AI falhar
+      addLog('ERROR', `❌ Erro ao inicializar Gemini: ${error.message}`);
     });
     
     // Tratar desconexões
@@ -975,12 +994,15 @@ const startWorker = async () => {
       }
     });
     
+    startWorkerHeartbeat();
+
     addLog('INFO', '🚀 Worker iniciado e aguardando mensagens...');
     addLog('INFO', `📊 Configuração:`);
     addLog('INFO', `   - Projeto: ${GCP_PROJECT_ID}`);
     addLog('INFO', `   - Bucket: ${GCS_BUCKET_NAME}`);
     addLog('INFO', `   - Subscription: ${PUBSUB_SUBSCRIPTION_NAME}`);
     addLog('INFO', `   - Max Retries: ${MAX_RETRIES}`);
+    addLog('INFO', `   - Heartbeat: ${WORKER_HEARTBEAT_MS}ms | Gap serial: ${TASK_GAP_MS}ms | Pub/Sub maxMessages: 1`);
     
   } catch (error) {
     addLog('ERROR', `❌ Erro ao iniciar worker: ${error.message}`);
@@ -1017,6 +1039,8 @@ module.exports = {
     queueLoopActive: !!pendingWorkInterval,
     cloudRunService: process.env.K_SERVICE || null
   }),
-  getLogs: () => recentLogs
+  getLogs: () => recentLogs,
+  ensureMongoReady,
+  runWorkerHeartbeatTick
 };
 

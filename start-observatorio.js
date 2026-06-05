@@ -1,9 +1,11 @@
 // Script temporário para iniciar apenas o servidor HTTP do observatório
+require('./backend/config/loadFonteVerdadeEnv').loadFrom(__dirname);
 const express = require('express');
+const { resolveWorkerHttpPort } = require('./backend/config/workerPort');
 const healthCheckRouter = require('./backend/worker/healthCheck');
 const observatorioRouter = require('./backend/worker/observatorio');
 
-const PORT = process.env.PORT || 8080;
+const PORT = resolveWorkerHttpPort();
 const app = express();
 
 app.use(express.json());

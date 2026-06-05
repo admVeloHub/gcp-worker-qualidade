@@ -1,23 +1,20 @@
-// VERSION: v1.0.0 | DATE: 2025-01-30 | AUTHOR: VeloHub Development Team
-// Health check endpoint para monitoramento do worker
-
+// VERSION: v1.2.0 | DATE: 2026-06-03 | AUTHOR: VeloHub Development Team
+// CHANGELOG: v1.2.0 - /health chama ensureMongoReady (religa sweep se Mongo conectou tarde)
+// CHANGELOG: v1.1.0 - Health check Gemini Enterprise (ADC); remove Speech-to-Text
 const express = require('express');
 const AudioAnaliseStatus = require('../models/AudioAnaliseStatus');
 const AudioAnaliseResult = require('../models/AudioAnaliseResult');
 
 const router = express.Router();
 
-/**
- * Verificar status da conexão MongoDB
- */
 const checkMongoDB = async () => {
   try {
     const statusConnection = await AudioAnaliseStatus.initializeConnection();
     const resultConnection = await AudioAnaliseResult.initializeConnection();
-    
+
     const statusReady = statusConnection.readyState === 1;
     const resultReady = resultConnection.readyState === 1;
-    
+
     return {
       status: statusReady && resultReady ? 'healthy' : 'unhealthy',
       statusConnection: {
@@ -39,9 +36,6 @@ const checkMongoDB = async () => {
   }
 };
 
-/**
- * Verificar status do Pub/Sub
- */
 const checkPubSub = (subscription) => {
   try {
     if (!subscription) {
@@ -50,7 +44,7 @@ const checkPubSub = (subscription) => {
         error: 'Subscription não inicializada'
       };
     }
-    
+
     return {
       status: 'healthy',
       subscriptionName: subscription.name
@@ -63,18 +57,13 @@ const checkPubSub = (subscription) => {
   }
 };
 
-/**
- * Verificar status do Vertex AI
- */
-const checkVertexAI = (speechClient, genAI) => {
+const checkGemini = (genAI) => {
   try {
-    const speechStatus = speechClient ? 'initialized' : 'not_initialized';
     const geminiStatus = genAI ? 'initialized' : 'not_initialized';
-    
+
     return {
-      status: speechClient && genAI ? 'healthy' : 'partial',
-      speechClient: speechStatus,
-      geminiAI: geminiStatus
+      status: genAI ? 'healthy' : 'not_initialized',
+      geminiClient: geminiStatus
     };
   } catch (error) {
     return {
@@ -84,51 +73,37 @@ const checkVertexAI = (speechClient, genAI) => {
   }
 };
 
-// Variáveis globais para acesso às instâncias do worker
 let workerSubscription = null;
-let workerSpeechClient = null;
 let workerGenAI = null;
 
-/**
- * Registrar instâncias do worker para health check
- */
-const registerWorkerInstances = (subscription, speechClient, genAI) => {
+const registerWorkerInstances = (subscription, genAI) => {
   workerSubscription = subscription;
-  workerSpeechClient = speechClient;
   workerGenAI = genAI;
 };
 
-/**
- * Endpoint de health check
- */
 router.get('/health', async (req, res) => {
   try {
-    const { getStats } = require('./audioProcessor');
+    const { getStats, ensureMongoReady } = require('./audioProcessor');
+    await ensureMongoReady();
     const stats = getStats();
     const uptime = Math.floor((Date.now() - stats.startTime) / 1000);
-    
-    // Verificar componentes
+
     const mongoStatus = await checkMongoDB();
-    
-    // Verificar Pub/Sub
     const pubsubStatus = checkPubSub(workerSubscription);
-    
-    // Verificar Vertex AI
-    const vertexStatus = checkVertexAI(workerSpeechClient, workerGenAI);
-    
-    // Calcular taxa de sucesso
-    const successRate = stats.totalProcessed > 0 
-      ? ((stats.totalSuccess / stats.totalProcessed) * 100).toFixed(2)
-      : 0;
-    
-    // Determinar status geral
-    const overallStatus = 
+    const geminiStatus = checkGemini(workerGenAI);
+
+    const successRate =
+      stats.totalProcessed > 0
+        ? ((stats.totalSuccess / stats.totalProcessed) * 100).toFixed(2)
+        : 0;
+
+    const overallStatus =
       mongoStatus.status === 'healthy' &&
       pubsubStatus.status === 'healthy' &&
-      vertexStatus.status === 'healthy'
+      geminiStatus.status === 'healthy'
         ? 'healthy'
         : 'degraded';
-    
+
     const healthData = {
       status: overallStatus,
       timestamp: new Date().toISOString(),
@@ -139,20 +114,20 @@ router.get('/health', async (req, res) => {
       components: {
         mongodb: mongoStatus,
         pubsub: pubsubStatus,
-        vertexAI: vertexStatus
+        gemini: geminiStatus
       },
       statistics: {
         totalProcessed: stats.totalProcessed,
         totalSuccess: stats.totalSuccess,
         totalFailed: stats.totalFailed,
         successRate: `${successRate}%`,
-        currentlyProcessing: stats.processingMessages.length,
-        lastMessageTime: stats.lastMessageTime 
+        currentlyProcessing: stats.processingMessages.size,
+        lastMessageTime: stats.lastMessageTime
           ? new Date(stats.lastMessageTime).toISOString()
           : null
       }
     };
-    
+
     const statusCode = overallStatus === 'healthy' ? 200 : 503;
     res.status(statusCode).json(healthData);
   } catch (error) {
@@ -166,4 +141,3 @@ router.get('/health', async (req, res) => {
 
 module.exports = router;
 module.exports.registerWorkerInstances = registerWorkerInstances;
-

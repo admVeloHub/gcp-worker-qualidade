@@ -1,5 +1,39 @@
 # DEPLOY LOG - Worker de Qualidade de Áudio
 
+## GitHub Push — migração Gemini+GPT RAG, retry autônomo e porta local WORKER — 2026-06-03
+
+**Data/Hora:** 2026-06-03  
+**Tipo:** Push GitHub  
+**Repositório:** admVeloHub/gcp-worker-qualidade  
+**Branch:** main  
+
+### Descrição:
+Migração dos agentes IA: Gemini Enterprise (`@google/genai`, ADC) para `transcricao` + `analiseDialogo`; GPT obrigatório com RAG (Responses API + 2 vector stores) para `criteriosDetalhados`, `palavrasCriticas`, `observacaoGPT`. Schema Mongoose alinhado à LISTA. Correções de confiabilidade: heartbeat interno (30s), fila serial (1 tarefa/vez), espera objeto GCS antes do processamento, erros recuperáveis por padrão, sweep 1 ação/tick, `maxMessages: 1` no Pub/Sub. Porta local via `WORKER` na FONTE DA VERDADE. `cloudbuild.yaml` v1.6: min-instances 1, no-cpu-throttling, 2Gi/2CPU, envs de worker.
+
+**Arquivos modificados:**
+- `backend/config/vertexAI.js` (v2.0.0)
+- `backend/config/openAIGPT.js` (v2.0.0)
+- `backend/config/gcsStorage.js` (v1.0.0, novo)
+- `backend/config/workerPort.js` (v1.0.0, novo)
+- `backend/models/AudioAnaliseResult.js` (v3.0.0)
+- `backend/worker/audioProcessor.js` (v4.1.1)
+- `backend/worker/audioAutoRetrySweep.js` (v1.4.0)
+- `backend/worker/healthCheck.js` (v1.2.0)
+- `backend/worker/observatorio.js`
+- `cloudbuild.yaml` (v1.6.0)
+- `env.example` (v1.4.1)
+- `package.json` / `package-lock.json`
+- `README.md`, `IMPACTO_PORTAL.md` (novo)
+- `scripts/validate-pipeline-contract.js` (novo)
+- `start-observatorio.js`
+- `DEPLOY_LOG.md`
+
+**Impacto:**
+- Novo contrato Mongo `audio_analise_results` (campos LISTA); portal/API podem precisar ajuste (ver `IMPACTO_PORTAL.md`)
+- Deploy Cloud Run necessário para aplicar infra e código em produção
+
+---
+
 ## GitHub Push — loop de fila ativa + drenagem backlog (sem observatório/Scheduler) — 2026-06-02
 
 **Data/Hora:** 2026-06-02  

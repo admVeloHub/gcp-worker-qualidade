@@ -1,4 +1,6 @@
-# VERSION: v1.4.0 | DATE: 2026-06-02 | AUTHOR: VeloHub Development Team
+# VERSION: v1.6.0 | DATE: 2026-06-03 | AUTHOR: VeloHub Development Team
+# CHANGELOG: v1.6.0 - WORKER_HEARTBEAT_MS, TASK_GAP_MS, GCS_READY_*; min-instances 1 + no-cpu-throttling reforçado
+# CHANGELOG: v1.5.0 - GEMINI_MODEL_ID + GOOGLE_CLOUD_LOCATION=global; Gemini ADC (sem secret Gemini)
 # CHANGELOG: v1.4.0 - deploy no serviço worker-qualidade (URL do observatório); não mais audio-worker
 # CHANGELOG: v1.3.0 - min-instances 1 + no-cpu-throttling: sweep Pub/Sub e auto-retry sem depender de HTTP/observatório
 # CHANGELOG: v1.2.0 - MONGO_ENV e OPENAI_API_KEY via Secret Manager; demais via --set-env-vars
@@ -46,7 +48,7 @@ steps:
           --max-instances 5 \
           --min-instances 1 \
           --no-cpu-throttling \
-          --update-env-vars=GCP_PROJECT_ID=velohub-471220,GCS_BUCKET_NAME=qualidade_audio_envio,PUBSUB_TOPIC_NAME=qualidade_audio_envio,PUBSUB_SUBSCRIPTION_NAME=upload_audio_qualidade,BACKEND_API_URL=https://backend-gcp-278491073220.us-east1.run.app,CONSOLE_ANALISES_DB=console_analises,GCP_LOCATION=us-central1,MAX_RETRIES=3,PORT=8080 \
+          --update-env-vars=GCP_PROJECT_ID=velohub-471220,GCS_BUCKET_NAME=qualidade_audio_envio,PUBSUB_TOPIC_NAME=qualidade_audio_envio,PUBSUB_SUBSCRIPTION_NAME=upload_audio_qualidade,BACKEND_API_URL=https://backend-gcp-278491073220.us-east1.run.app,CONSOLE_ANALISES_DB=console_analises,GCP_LOCATION=us-central1,GOOGLE_CLOUD_LOCATION=global,GEMINI_MODEL_ID=gemini-3.5-flash,MAX_RETRIES=3,PORT=8080,GPT_MODEL=gpt-5-mini,OPENAI_VECTOR_STORE_PUBLIC=vs_69fe281ef0f48191a5587521c18a18c1,OPENAI_VECTOR_STORE_INTERNAL=vs_6a0b05c7fe34819186e4f6dab9f1bf56,WORKER_HEARTBEAT_MS=30000,TASK_GAP_MS=1000,GCS_READY_MAX_WAIT_MS=45000,GCS_READY_POLL_MS=1000,BACKLOG_IMMEDIATE=true,SWEEP_DIRECT_PROCESS=true,PENDING_WORK_ACTIVE_MS=15000 \
           --update-secrets=MONGO_ENV=MONGO_ENV:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest
 
 images:
